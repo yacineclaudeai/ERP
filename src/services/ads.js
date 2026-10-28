@@ -1,7 +1,7 @@
 import { getSetting, setSetting } from '../db.js';
 import { HttpError } from './orders.js';
 
-// Rules the launch routine follows. Budgets are in the ad account currency (DZD).
+// Rules the launch routine follows. Budgets are in the ad account currency (EUR or USD on Meta, not DZD).
 const DEFAULTS = {
   mode: 'approval', // approval: build the campaign as a draft and wait for a yes; auto: go live directly
   min_stock: 20, // launch only when at least this many units are in stock
