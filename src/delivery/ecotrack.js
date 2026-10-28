@@ -18,10 +18,14 @@ async function call(company, method, endpoint, params) {
   if (!company.base_url || !company.api_token) {
     throw new Error('Ecotrack: base_url et api_token sont obligatoires');
   }
-  const url = new URL(`/api/v1/${endpoint}`, company.base_url);
+  // base_url may be given with or without the /api/v1 suffix.
+  const root = company.base_url.trim().replace(/\/+$/, '').replace(/\/api\/v1$/, '');
+  const url = new URL(`${root}/api/v1/${endpoint}`);
+  // Ecotrack expects the token as a query parameter, not a Bearer header.
+  url.searchParams.set('api_token', company.api_token);
   const init = {
     method,
-    headers: { Authorization: `Bearer ${company.api_token}`, Accept: 'application/json' },
+    headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(20_000),
   };
   if (method === 'GET') {

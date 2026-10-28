@@ -116,3 +116,25 @@ test('dispatch failure keeps the order confirmed with the error', async () => {
   assert.equal(manual.status, 'dispatched');
   assert.equal(manual.tracking, 'ABC123');
 });
+
+test('ecotrack sends api_token as a query parameter and accepts base_url with /api/v1', async () => {
+  const { ecotrack } = await import('../src/delivery/ecotrack.js');
+  const realFetch = globalThis.fetch;
+  let called;
+  globalThis.fetch = async (url, init) => {
+    called = { url: String(url), init };
+    return new Response(JSON.stringify({ success: true, tracking: 'ECO123' }), { status: 200 });
+  };
+  try {
+    const r = await ecotrack.createShipment(
+      { base_url: 'https://demo.ecotrack.dz/api/v1/', api_token: 'TOK' },
+      { reference: 'CMD-1', customer_name: 'A', phone: '0555000000', wilaya_code: 16, total: 1000, quantity: 1 },
+      { name: 'P' },
+    );
+    assert.equal(r.tracking, 'ECO123');
+    assert.equal(called.url, 'https://demo.ecotrack.dz/api/v1/create/order?api_token=TOK');
+    assert.equal(called.init.headers.Authorization, undefined);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
