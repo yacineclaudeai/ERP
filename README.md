@@ -29,6 +29,8 @@
 
 ## التشغيل على Netlify (production)
 
+الموقع: https://erp-yacine.netlify.app (كل تبديل في `main` يطلع وحدو).
+
 الـ ERP يخدم على Netlify: الواجهة ملفات static (`public/`)، الـ API في Netlify Function (`netlify/functions/api.mjs`)، والتتبع يتحدث كل 30 دقيقة (`netlify/functions/sync-tracking.mjs`). قاعدة البيانات هي Netlify Database (Postgres): Netlify يخلقها ويطبق الـ migrations اللي في `netlify/database/migrations/` وحدو مع كل deploy.
 
 1. اربط الريبو بـ Netlify (Add new project ← Import from GitHub). الإعدادات تتقرا من `netlify.toml`.
