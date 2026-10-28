@@ -1,0 +1,122 @@
+import { getSetting, setSetting } from '../db.js';
+import { HttpError } from './orders.js';
+
+// Rules the launch routine follows. Budgets are in the ad account currency (EUR or USD on Meta, not DZD).
+const DEFAULTS = {
+  mode: 'approval', // approval: build the campaign as a draft and wait for a yes; auto: go live directly
+  min_stock: 7, // launch only when at least this many units are in stock
+  pause_below: 5, // pause a running campaign when stock drops under this
+  daily_budget: 9, // budget of each new campaign unless the product sets ad_daily_budget
+  max_total_daily_budget: 0, // cap on the sum of running campaigns; 0 = no cap
+  ad_account_id: '', // default account; a store's own ad_account_id wins
+};
+
+const LIVE = ['draft', 'active'];
+
+export async function getAdSettings(db) {
+  const out = {};
+  for (const [key, def] of Object.entries(DEFAULTS)) {
+    const v = await getSetting(db, `ads.${key}`);
+    out[key] = v == null ? def : typeof def === 'number' ? Number(v) : v;
+  }
+  return out;
+}
+
+export async function saveAdSettings(db, body) {
+  for (const [key, def] of Object.entries(DEFAULTS)) {
+    if (body[key] === undefined) continue;
+    let v = body[key];
+    if (typeof def === 'number') {
+      v = Number(v);
+      if (!(v >= 0)) throw new HttpError(400, `قيمة غير صحيحة: ${key}`);
+    } else {
+      v = String(v ?? '').trim();
+    }
+    if (key === 'mode' && !['approval', 'auto'].includes(v)) throw new HttpError(400, 'mode لازم approval ولا auto');
+    await setSetting(db, `ads.${key}`, v);
+  }
+  return getAdSettings(db);
+}
+
+// What the launch routine should do now: which products to launch, which campaigns to pause.
+export async function getAdPlan(db) {
+  const s = await getAdSettings(db);
+  const products = await db.all(`
+    SELECT p.id, p.name, p.sku, p.price, p.stock, p.landing_url, p.active, p.ad_daily_budget, p.ad_creative_folder,
+      s.name AS store_name, COALESCE(NULLIF(s.ad_account_id, ''), ?) AS ad_account_id,
+      (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id
+        AND o.created_at >= now() - interval '7 days') AS orders_7d
+    FROM products p LEFT JOIN stores s ON s.id = p.store_id`, s.ad_account_id || null);
+  const campaigns = await db.all(`SELECT * FROM ad_campaigns WHERE status IN ('draft', 'active')`);
+  const liveByProduct = new Set(campaigns.map((c) => c.product_id));
+  const byId = new Map(products.map((p) => [p.id, p]));
+
+  let budgetUsed = campaigns.filter((c) => c.status === 'active').reduce((t, c) => t + c.daily_budget, 0);
+  const cap = s.max_total_daily_budget;
+  const to_launch = [];
+  const skipped = [];
+
+  const candidates = products
+    .filter((p) => p.active && p.stock >= s.min_stock && !liveByProduct.has(p.id))
+    .sort((a, b) => b.stock - a.stock);
+  for (const p of candidates) {
+    const budget = p.ad_daily_budget > 0 ? p.ad_daily_budget : s.daily_budget;
+    const item = { ...p, days_of_stock: p.orders_7d ? Math.round((p.stock / (p.orders_7d / 7)) * 10) / 10 : null };
+    if (!p.landing_url) skipped.push({ ...item, reason: 'ما عندوش لاندينغ بيج' });
+    else if (!p.ad_creative_folder) skipped.push({ ...item, reason: 'ما عندوش دوسي كرياتيف في الدرايف' });
+    else if (!p.ad_account_id) skipped.push({ ...item, reason: 'ما كانش حساب إعلاني للبوتيك' });
+    else if (!(budget > 0)) skipped.push({ ...item, reason: 'البودجي اليومي ما تحددش' });
+    else if (cap > 0 && budgetUsed + budget > cap) skipped.push({ ...item, reason: 'فات السقف اليومي' });
+    else {
+      to_launch.push({ ...item, daily_budget: budget });
+      budgetUsed += budget;
+    }
+  }
+
+  const to_pause = campaigns
+    .filter((c) => {
+      const p = byId.get(c.product_id);
+      return !p || !p.active || p.stock < s.pause_below;
+    })
+    .map((c) => ({ ...c, product_name: byId.get(c.product_id)?.name, stock: byId.get(c.product_id)?.stock ?? 0 }));
+
+  return { settings: s, to_launch, to_pause, skipped, planned_daily_budget: budgetUsed };
+}
+
+export function listAdCampaigns(db) {
+  return db.all(`
+    SELECT c.*, p.name AS product_name, p.stock FROM ad_campaigns c JOIN products p ON p.id = c.product_id
+    ORDER BY c.id DESC LIMIT 300`);
+}
+
+const STATUSES = ['draft', 'active', 'paused', 'stopped'];
+
+export async function recordAdCampaign(db, body) {
+  const productId = Number(body.product_id);
+  if (!await db.get('SELECT 1 FROM products WHERE id = ?', productId || 0)) throw new HttpError(404, 'المنتج ما كانش');
+  const status = body.status || 'draft';
+  if (!STATUSES.includes(status)) throw new HttpError(400, 'حالة غير صحيحة');
+  const live = await db.get(`SELECT id FROM ad_campaigns WHERE product_id = ? AND status IN (${LIVE.map(() => '?').join(',')})`,
+    productId, ...LIVE);
+  if (live && LIVE.includes(status)) throw new HttpError(409, 'هذا المنتج عندو حملة شاعلة');
+  const r = await db.run(`INSERT INTO ad_campaigns (product_id, ad_account_id, meta_campaign_id, daily_budget, status, note)
+    VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
+    productId, body.ad_account_id ? String(body.ad_account_id) : null,
+    body.meta_campaign_id ? String(body.meta_campaign_id) : null,
+    Number(body.daily_budget) || 0, status, body.note ? String(body.note) : null,
+  );
+  return r.rows[0];
+}
+
+export async function updateAdCampaign(db, id, body) {
+  const c = await db.get('SELECT * FROM ad_campaigns WHERE id = ?', id || 0);
+  if (!c) throw new HttpError(404, 'الحملة ما كانش');
+  const status = body.status ?? c.status;
+  if (!STATUSES.includes(status)) throw new HttpError(400, 'حالة غير صحيحة');
+  const r = await db.run(`UPDATE ad_campaigns SET status = ?, meta_campaign_id = ?, daily_budget = ?, note = ?,
+    updated_at = now() WHERE id = ? RETURNING *`,
+    status, body.meta_campaign_id ?? c.meta_campaign_id,
+    body.daily_budget != null ? Number(body.daily_budget) : c.daily_budget, body.note ?? c.note, id,
+  );
+  return r.rows[0];
+}
