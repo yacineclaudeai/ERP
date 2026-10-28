@@ -70,7 +70,7 @@ export async function fetchSheetRows(url) {
   }
   const type = res.headers.get('content-type') || '';
   if (!res.ok || type.includes('text/html')) {
-    console.warn('sheet not readable', res.status, type, new URL(res.url).host);
+    console.warn('sheet not readable', res.status, type, res.url.split('?')[0]);
     throw new HttpError(400, 'الشيت ماهوش مشارك: دير Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur');
   }
   return parseCsv(await res.text());
