@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commande</title>
+  <style>body{margin:0;padding:16px;background:#fff}</style>
+</head>
+<body>
+  <div id="erp-order-form"></div>
+  <script>
+    // Standalone order page: /form.html?key=PRODUCT_KEY (usable as a link or in an iframe).
+    var s = document.createElement('script');
+    s.src = '/embed.js';
+    s.setAttribute('data-key', new URLSearchParams(location.search).get('key') || '');
+    document.body.appendChild(s);
+  </script>
+</body>
+</html>

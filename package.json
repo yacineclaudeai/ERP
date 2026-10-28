@@ -1,0 +1,17 @@
+{
+  "name": "erp-cod",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ERP for Algerian COD e-commerce: products, landing-page orders, confirmation, auto-dispatch to delivery companies by wilaya, stock and stats.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js",
+    "seed": "node --disable-warning=ExperimentalWarning src/seed.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
