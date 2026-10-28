@@ -601,17 +601,21 @@ async function linkStoresDialog(stores) {
 
 // ---------- products ----------
 async function productsPage() {
-  const [products, stores] = await Promise.all([api('GET', '/products'), api('GET', '/stores')]);
+  const [products, stores, companies] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies')]);
   const isAdmin = state.user.role === 'admin';
+  const select = (field, list, selected, empty) => `<select class="cell" data-product-field="${field}"><option value="">${empty}</option>
+    ${list.map((x) => `<option value="${x.id}" ${x.id === selected ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
   const main = shell(`
     <h2>المنتجات</h2>
     ${isAdmin ? `<div class="bar"><button class="btn primary" id="add">+ منتج جديد</button>
       <button class="btn" id="link-stores" title="يقرا الطرود اللي بعثها كل فرع عند شركة التوصيل تاعو، ويعرف منها كل منتج لأنهي فرع">ربط المنتجات بالفروع تلقائياً</button></div>` : ''}
     <div class="table-wrap"><table>
-      <tr><th>المنتج</th><th>البوتيك</th><th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
-      ${products.map((p) => `<tr>
+      <tr><th>المنتج</th><th>البوتيك</th><th>شركة التوصيل</th><th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
+      ${products.map((p) => `<tr data-product="${p.id}">
         <td>${esc(p.name)} ${p.sku ? `<span class="muted">${esc(p.sku)}</span>` : ''} ${p.active ? '' : '<span class="badge">موقف</span>'}</td>
-        <td>${esc(p.store_name || '—')}</td>
+        <td>${isAdmin ? select('store_id', stores, p.store_id, '— بلا بوتيك —') : esc(p.store_name || '—')}</td>
+        <td>${isAdmin ? select('company_id', companies, p.company_id, `نفس البوتيك${p.company_from_store && p.company_name ? ` (${esc(p.company_name)})` : ''}`)
+          : esc(p.company_name || '—')}</td>
         <td class="num">${money(p.price)}</td><td class="num">${money(p.cost)}</td>
         <td class="num ${p.stock <= 5 ? 'neg' : ''}">${p.stock}</td>
         <td>${p.landing_url ? `<a href="${esc(p.landing_url)}" target="_blank" rel="noopener">فتح</a>` : '<span class="muted">—</span>'}</td>
@@ -623,6 +627,13 @@ async function productsPage() {
         </td></tr>`).join('')}
     </table></div>`);
 
+  // Store and delivery company save right away; the product's open orders follow.
+  main.querySelectorAll('[data-product-field]').forEach((el) => (el.onchange = guard(async () => {
+    const id = el.closest('tr').dataset.product;
+    const r = await api('PUT', `/products/${id}/store`, { [el.dataset.productField]: el.value || null });
+    toast(r.orders ? `تم الحفظ، ${r.orders} طلبية تبعتو` : 'تم الحفظ');
+    router();
+  })));
   const byId = (id) => products.find((p) => p.id === Number(id));
   const add = main.querySelector('#add');
   if (add) add.onclick = () => productForm(null, stores);
@@ -803,14 +814,15 @@ async function storesPage() {
   const [stores, companies] = await Promise.all([api('GET', '/stores'), api('GET', '/delivery/companies')]);
   const main = shell(`
     <h2>البوتيكات</h2>
-    <p class="muted">كل بوتيك تبعث الطلبيات المؤكدة لحساب التوصيل تاعها. تقدر تزيد استثناءات: ولايات تروح لشركة أخرى. المنتجات تتربط بالبوتيك من صفحة "المنتجات".</p>
+    <p class="muted">كل بوتيك عندها شركة توصيل، وعندها حسابها الخاص (التوكن) عند كل شركة تخدم معاها. المنتجات تتربط بالبوتيك والشركة من صفحة "المنتجات".</p>
     <div class="bar"><button class="btn primary" id="add">+ بوتيك</button></div>
     <div class="table-wrap"><table>
-      <tr><th>البوتيك</th><th>حساب التوصيل</th><th>استثناءات حسب الولاية</th><th>منتجات</th><th></th></tr>
+      <tr><th>البوتيك</th><th>شركة التوصيل</th><th>الحسابات (التوكن)</th><th>استثناءات حسب الولاية</th><th>منتجات</th><th></th></tr>
       ${stores.map((s) => `<tr><td>${esc(s.name)}</td><td>${esc(s.company_name || '— (حسب الولاية)')}</td>
+        <td class="muted">${s.accounts.filter((a) => a.has_token).map((a) => `${esc(a.company_name)} ✓`).join('، ') || '<span class="neg">ما كاين حتى توكن</span>'}</td>
         <td class="muted">${s.routes.map((r) => `${wilaya(r.wilaya_code)} ← ${esc(r.company_name)}`).join('، ') || '—'}</td>
         <td class="num">${s.products_count}</td>
-        <td><button class="btn small" data-edit="${s.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">زيد البوتيك الأولى</td></tr>'}
+        <td><button class="btn small" data-edit="${s.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">زيد البوتيك الأولى</td></tr>'}
     </table></div>`);
   main.querySelector('#add').onclick = () => storeForm(null, companies);
   main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => storeForm(stores.find((s) => s.id === Number(b.dataset.edit)), companies)));
@@ -828,7 +840,16 @@ function storeForm(store, companies) {
     <h3>${store ? `تعديل ${esc(store.name)}` : 'بوتيك جديدة'}</h3>
     <form class="stack" id="store-form">
       <label>الاسم<input name="name" value="${esc(x.name)}" required></label>
-      <label>حساب التوصيل تاع البوتيك<select name="company_id"><option value="">— حسب الولاية (صفحة التوصيل)</option>${companyOptions(x.company_id)}</select></label>
+      <label>شركة التوصيل تاع البوتيك<select name="company_id"><option value="">— حسب الولاية (صفحة التوصيل)</option>${companyOptions(x.company_id)}</select></label>
+      <div class="muted">الحساب تاع البوتيك عند كل شركة (فارغ = ما يتبدلش)</div>
+      ${companies.map((c) => {
+        const a = (x.accounts || []).find((y) => y.company_id === c.id) || {};
+        const myEcom = /ecom-dz/.test(c.base_url || '');
+        return `<div class="grid2 account-row" data-company="${c.id}">
+          <label>${esc(c.name)}: التوكن<input name="api_token" dir="ltr" autocomplete="off" placeholder="${a.has_token ? 'محطوط ✓' : ''}"></label>
+          ${myEcom ? `<label>${esc(c.name)}: key<input name="api_key" dir="ltr" autocomplete="off" placeholder="${a.has_key ? 'محطوط ✓' : ''}"></label>` : '<div></div>'}
+        </div>`;
+      }).join('')}
       <div class="muted">استثناءات: هاد الولايات تروح لشركة أخرى</div>
       <div class="stack" id="routes">${x.routes.map(routeRow).join('')}</div>
       <div><button class="btn small" type="button" id="add-route">+ استثناء</button></div>
@@ -859,7 +880,13 @@ function storeForm(store, companies) {
     e.preventDefault();
     const body = {
       name: e.target.elements.name.value,
-      company_id: e.target.company_id.value || null,
+      // The first company select is the store's own; the exception rows have more.
+      company_id: e.target.querySelector('select[name=company_id]').value || null,
+      accounts: [...box.querySelectorAll('.account-row')].map((row) => ({
+        company_id: Number(row.dataset.company),
+        api_token: row.querySelector('[name=api_token]').value.trim() || null,
+        api_key: row.querySelector('[name=api_key]')?.value.trim() || null,
+      })),
       routes: [...routes.querySelectorAll('.route-row')].map((row) => ({
         wilaya_code: Number(row.querySelector('[name=wilaya_code]').value),
         company_id: Number(row.querySelector('[name=company_id]').value),

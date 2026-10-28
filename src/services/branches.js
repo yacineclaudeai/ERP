@@ -2,7 +2,7 @@
 // shipped: every store has its own delivery account, so the products named in
 // that account's parcels belong to that store. Read-only on the delivery side.
 import { getProvider } from '../delivery/index.js';
-import { HttpError, rerouteProductOrders } from './orders.js';
+import { HttpError, companyAccount, rerouteProductOrders } from './orders.js';
 
 export const normalizeName = (v) => String(v ?? '')
   .toLowerCase()
@@ -36,16 +36,15 @@ const DAYS = 60;
 // The page reads one page per request so each call stays well under the
 // function time limit (Ecotrack can take 10-30 s per page).
 export async function scanStore(db, storeId, page = 1) {
-  const s = await db.get(`
-    SELECT s.id, s.name, c.provider, c.base_url, c.api_token, c.name AS company_name
-    FROM stores s LEFT JOIN delivery_companies c ON c.id = s.company_id WHERE s.id = ?`, storeId);
+  const s = await db.get('SELECT id, name, company_id FROM stores WHERE id = ?', storeId);
   if (!s) throw new HttpError(404, 'البوتيك غير موجود');
-  if (!s.provider) throw new HttpError(400, `${s.name}: ما عندهاش شركة توصيل`);
-  const provider = getProvider(s.provider);
-  if (!provider.listParcels) throw new HttpError(400, `${s.name}: ما نقدرش نقرا طرود ${s.company_name} مازال`);
+  if (!s.company_id) throw new HttpError(400, `${s.name}: ما عندهاش شركة توصيل`);
+  const company = await companyAccount(db, s.company_id, s.id);
+  const provider = getProvider(company.provider);
+  if (!provider.listParcels) throw new HttpError(400, `${s.name}: ما نقدرش نقرا طرود ${company.name} مازال`);
   const end = new Date();
   const start = new Date(end.getTime() - DAYS * 86400_000);
-  const { parcels, last_page } = await provider.listParcels(s, start, end, page);
+  const { parcels, last_page } = await provider.listParcels(company, start, end, page);
   return { store_id: s.id, page, last_page, texts: parcels.map((x) => normalizeName(x.products)).filter(Boolean) };
 }
 

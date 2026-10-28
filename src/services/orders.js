@@ -23,14 +23,15 @@ export function normalizePhone(raw) {
   return /^0\d{8,9}$/.test(p) ? p : null;
 }
 
-// Company choice, most specific first: the store's exception for this wilaya,
-// the store's own account, the global wilaya route, then the default company.
+// Company choice, most specific first: the company set on the product, the
+// store's exception for this wilaya, the store's own company, the global
+// wilaya route, then the default company.
 // Shipping fees always come from the global wilaya table.
-export async function resolveRoute(db, wilayaCode, storeId = null) {
+export async function resolveRoute(db, wilayaCode, storeId = null, productCompanyId = null) {
   const route = await db.get('SELECT * FROM delivery_routes WHERE wilaya_code = ?', wilayaCode);
   const fallback = await getSetting(db, 'default_company_id');
-  let companyId = null;
-  if (storeId) {
+  let companyId = productCompanyId ?? null;
+  if (storeId && !companyId) {
     companyId = (await db.get('SELECT company_id FROM store_routes WHERE store_id = ? AND wilaya_code = ?', storeId, wilayaCode))?.company_id
       ?? (await db.get('SELECT company_id FROM stores WHERE id = ?', storeId))?.company_id
       ?? null;
@@ -40,6 +41,15 @@ export async function resolveRoute(db, wilayaCode, storeId = null) {
     home_fee: route?.home_fee ?? 0,
     desk_fee: route?.desk_fee ?? 0,
   };
+}
+
+// A company as one store uses it: the store's own token and key at that
+// company win over the company-wide ones.
+export async function companyAccount(db, companyId, storeId = null) {
+  const company = await db.get('SELECT * FROM delivery_companies WHERE id = ?', companyId);
+  if (!company || !storeId) return company;
+  const account = await db.get('SELECT api_token, api_key FROM store_accounts WHERE store_id = ? AND company_id = ?', storeId, companyId);
+  return { ...company, api_token: account?.api_token || company.api_token, api_key: account?.api_key || null };
 }
 
 function logEvent(db, orderId, type, message, userId = null) {
@@ -56,7 +66,7 @@ async function moveStock(db, productId, orderId, quantity, reason) {
 // lock = true takes a row lock on the order, for read-then-write inside a transaction.
 export async function getOrder(db, id, { lock = false } = {}) {
   const order = await db.get(`
-    SELECT o.*, p.name AS product_name, p.store_id, s.name AS store_name, c.name AS company_name, c.provider AS company_provider
+    SELECT o.*, p.name AS product_name, p.store_id, p.company_id AS product_company_id, s.name AS store_name, c.name AS company_name, c.provider AS company_provider
     FROM orders o
     JOIN products p ON p.id = o.product_id
     LEFT JOIN stores s ON s.id = p.store_id
@@ -97,7 +107,7 @@ export async function createOrder(db, input, { source = 'manual', userId = null,
   if (!product || (source === 'landing' && !product.active)) throw new HttpError(404, 'المنتج غير موجود');
 
   const f = validateOrderFields(input);
-  const route = await resolveRoute(db, f.wilaya_code, product.store_id);
+  const route = await resolveRoute(db, f.wilaya_code, product.store_id, product.company_id);
   const trusted = source !== 'landing';
   const unit_price = input.unit_price != null && trusted ? Number(input.unit_price) : product.price;
   const delivery_fee = input.delivery_fee != null && trusted ? Number(input.delivery_fee) : f.stop_desk ? route.desk_fee : route.home_fee;
@@ -141,7 +151,8 @@ export async function updateOrder(db, id, input, userId = null) {
       if (!product) throw new HttpError(404, 'المنتج غير موجود');
     }
     const storeId = product ? product.store_id : order.store_id;
-    const route = await resolveRoute(t, f.wilaya_code, storeId);
+    const productCompanyId = product ? product.company_id : order.product_company_id;
+    const route = await resolveRoute(t, f.wilaya_code, storeId, productCompanyId);
     const unit_price = input.unit_price != null ? Number(input.unit_price) : product ? product.price : order.unit_price;
     const delivery_fee = input.delivery_fee != null
       ? Number(input.delivery_fee)
@@ -150,7 +161,7 @@ export async function updateOrder(db, id, input, userId = null) {
         : order.delivery_fee;
     const company_id = input.company_id !== undefined
       ? (input.company_id ? Number(input.company_id) : null)
-      : f.wilaya_code !== order.wilaya_code || storeId !== order.store_id ? route.company_id : order.company_id;
+      : f.wilaya_code !== order.wilaya_code || product ? route.company_id : order.company_id;
 
     if (order.stock_reserved && f.quantity !== order.quantity) {
       await moveStock(t, order.product_id, id, order.quantity - f.quantity, 'تعديل الكمية');
@@ -233,8 +244,8 @@ export async function applyAction(db, id, action, { userId = null, note = null }
 export async function dispatchOrder(db, id, { userId = null, tracking = null } = {}) {
   const order = await getOrder(db, id);
   if (order.status !== 'confirmed') throw new HttpError(409, 'لازم الطلبية تكون مؤكدة');
-  const companyId = order.company_id ?? (await resolveRoute(db, order.wilaya_code, order.store_id)).company_id;
-  const company = companyId && await db.get('SELECT * FROM delivery_companies WHERE id = ?', companyId);
+  const companyId = order.company_id ?? (await resolveRoute(db, order.wilaya_code, order.store_id, order.product_company_id)).company_id;
+  const company = companyId && await companyAccount(db, companyId, order.store_id);
   const fail = async (msg) => {
     await db.run(`UPDATE orders SET dispatch_error = ?, updated_at = now() WHERE id = ?`, msg, id);
     await logEvent(db, id, 'dispatch_failed', msg, userId);
@@ -267,13 +278,15 @@ export async function confirmAndDispatch(db, id, opts = {}) {
 // Pulls the latest status of dispatched orders from the delivery APIs.
 export async function syncTracking(db) {
   const rows = await db.all(`
-    SELECT c.*, o.id AS order_id, o.tracking FROM orders o JOIN delivery_companies c ON c.id = o.company_id
+    SELECT o.id AS order_id, o.tracking, o.company_id, p.store_id
+    FROM orders o JOIN products p ON p.id = o.product_id JOIN delivery_companies c ON c.id = o.company_id
     WHERE o.status = 'dispatched' AND o.tracking IS NOT NULL AND c.provider != 'manual'`);
   const summary = { checked: 0, delivered: 0, returned: 0, errors: 0 };
   for (const row of rows) {
     summary.checked += 1;
     try {
-      const { status } = await getProvider(row.provider).getStatus(row, row.tracking);
+      const company = await companyAccount(db, row.company_id, row.store_id);
+      const { status } = await getProvider(company.provider).getStatus(company, row.tracking);
       if (status === 'delivered' || status === 'returned') {
         await applyAction(db, row.order_id, status, { note: 'تحديث أوتوماتيكي من شركة التوصيل' });
         summary[status] += 1;
@@ -288,12 +301,12 @@ export async function syncTracking(db) {
 // A product moved to another store (branch): its orders not yet sent follow it
 // to that store's delivery company.
 export async function rerouteProductOrders(db, productId) {
-  const product = await db.get('SELECT store_id FROM products WHERE id = ?', productId);
+  const product = await db.get('SELECT store_id, company_id FROM products WHERE id = ?', productId);
   if (!product) return 0;
   const orders = await db.all(`SELECT id, wilaya_code FROM orders WHERE product_id = ? AND status IN (${EDITABLE.map(() => '?').join(', ')})`,
     productId, ...EDITABLE);
   for (const o of orders) {
-    const route = await resolveRoute(db, o.wilaya_code, product.store_id);
+    const route = await resolveRoute(db, o.wilaya_code, product.store_id, product.company_id);
     await db.run('UPDATE orders SET company_id = ?, updated_at = now() WHERE id = ?', route.company_id, o.id);
   }
   return orders.length;

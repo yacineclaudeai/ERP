@@ -56,10 +56,12 @@ export function apiRouter(db) {
 
   // ---- products ----
   r.get('/products', async (c) => c.json(await db.all(`
-    SELECT p.*, s.name AS store_name,
+    SELECT p.*, s.name AS store_name, COALESCE(pc.name, sc.name) AS company_name, p.company_id IS NULL AS company_from_store,
       (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id) AS orders_count,
       (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id AND o.status IN ('new','no_answer','postponed')) AS pending_count
     FROM products p LEFT JOIN stores s ON s.id = p.store_id
+    LEFT JOIN delivery_companies pc ON pc.id = p.company_id
+    LEFT JOIN delivery_companies sc ON sc.id = s.company_id
     ORDER BY p.active DESC, p.id DESC`)));
 
   const productFields = (b) => ({
@@ -69,6 +71,7 @@ export function apiRouter(db) {
     cost: Number(b.cost) || 0,
     landing_url: b.landing_url ? String(b.landing_url).trim() : null,
     store_id: b.store_id ? Number(b.store_id) : null,
+    company_id: b.company_id ? Number(b.company_id) : null,
     active: !(b.active === false || b.active === 0 || b.active === '0'),
     ad_daily_budget: Number(b.ad_daily_budget) > 0 ? Number(b.ad_daily_budget) : null,
     ad_creative_folder: b.ad_creative_folder ? String(b.ad_creative_folder).trim() : null,
@@ -80,9 +83,9 @@ export function apiRouter(db) {
     const stock = Math.floor(Number(body(c).stock) || 0);
     const product = await db.tx(async (t) => {
       const { rows: [p] } = await t.run(`
-        INSERT INTO products (name, sku, price, cost, stock, landing_url, store_id, active, ad_daily_budget, ad_creative_folder, public_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
-        f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.store_id, f.active, f.ad_daily_budget, f.ad_creative_folder, newKey());
+        INSERT INTO products (name, sku, price, cost, stock, landing_url, store_id, company_id, active, ad_daily_budget, ad_creative_folder, public_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.store_id, f.company_id, f.active, f.ad_daily_budget, f.ad_creative_folder, newKey());
       if (stock) {
         await t.run(`INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, 'مخزون أولي')`, p.id, stock);
       }
@@ -100,21 +103,30 @@ export function apiRouter(db) {
       UPDATE products SET name = ?, sku = ?, price = ?, cost = ?, landing_url = ?, store_id = ?, active = ? WHERE id = ?`,
       f.name, f.sku, f.price, f.cost, f.landing_url, f.store_id, f.active, id);
     if (!changes) throw new HttpError(404, 'المنتج غير موجود');
-    await rerouteProductOrders(db, id);
-    // Only touch the ad fields the caller sends, so older forms do not wipe them.
-    for (const key of ['ad_daily_budget', 'ad_creative_folder']) {
+    // Only touch the ad and company fields the caller sends, so older forms do not wipe them.
+    for (const key of ['ad_daily_budget', 'ad_creative_folder', 'company_id']) {
       if (b[key] !== undefined) await db.run(`UPDATE products SET ${key} = ? WHERE id = ?`, f[key], id);
     }
+    await rerouteProductOrders(db, id);
     return c.json(await db.get('SELECT * FROM products WHERE id = ?', id));
   });
 
-  // Move a product to a store (branch) from the orders table; its open orders follow.
+  // Move a product to a store (branch) and/or delivery company from the orders
+  // table; its open orders follow.
   r.put('/products/:id/store', requireAdmin, async (c) => {
     const id = idParam(c);
-    const storeId = body(c).store_id ? Number(body(c).store_id) : null;
-    if (storeId && !await db.get('SELECT id FROM stores WHERE id = ?', storeId)) throw new HttpError(404, 'البوتيك غير موجود');
-    const { changes } = await db.run('UPDATE products SET store_id = ? WHERE id = ?', storeId, id);
-    if (!changes) throw new HttpError(404, 'المنتج غير موجود');
+    const b = body(c);
+    if (!await db.get('SELECT id FROM products WHERE id = ?', id)) throw new HttpError(404, 'المنتج غير موجود');
+    if (b.store_id !== undefined) {
+      const storeId = b.store_id ? Number(b.store_id) : null;
+      if (storeId && !await db.get('SELECT id FROM stores WHERE id = ?', storeId)) throw new HttpError(404, 'البوتيك غير موجود');
+      await db.run('UPDATE products SET store_id = ? WHERE id = ?', storeId, id);
+    }
+    if (b.company_id !== undefined) {
+      const companyId = b.company_id ? Number(b.company_id) : null;
+      if (companyId && !await db.get('SELECT id FROM delivery_companies WHERE id = ?', companyId)) throw new HttpError(404, 'الشركة غير موجودة');
+      await db.run('UPDATE products SET company_id = ? WHERE id = ?', companyId, id);
+    }
     return c.json({ orders: await rerouteProductOrders(db, id) });
   });
 
@@ -176,7 +188,7 @@ export function apiRouter(db) {
     const offset = Math.max(0, Number(q.offset) || 0);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = await db.all(`
-      SELECT o.*, p.name AS product_name, p.store_id, s.name AS store_name, c.name AS company_name,
+      SELECT o.*, p.name AS product_name, p.store_id, p.company_id AS product_company_id, s.name AS store_name, c.name AS company_name,
         (SELECT u.username FROM order_events e JOIN users u ON u.id = e.user_id
           WHERE e.order_id = o.id AND e.type = 'confirmed' ORDER BY e.id DESC LIMIT 1) AS confirmed_by
       FROM orders o JOIN products p ON p.id = o.product_id
@@ -288,10 +300,19 @@ export function apiRouter(db) {
       SELECT s.*, c.name AS company_name,
         (SELECT COUNT(*) FROM products p WHERE p.store_id = s.id) AS products_count
       FROM stores s LEFT JOIN delivery_companies c ON c.id = s.company_id ORDER BY s.name`);
+    // Tokens never leave the server: only whether one is set.
+    const accounts = await db.all(`
+      SELECT a.store_id, a.company_id, c.name AS company_name, a.api_token IS NOT NULL AND a.api_token <> '' AS has_token,
+        a.api_key IS NOT NULL AND a.api_key <> '' AS has_key
+      FROM store_accounts a JOIN delivery_companies c ON c.id = a.company_id ORDER BY c.name`);
     const routes = await db.all(`
       SELECT r.*, c.name AS company_name FROM store_routes r JOIN delivery_companies c ON c.id = r.company_id
       ORDER BY r.wilaya_code`);
-    return c.json(stores.map((s) => ({ ...s, routes: routes.filter((x) => x.store_id === s.id) })));
+    return c.json(stores.map((s) => ({
+      ...s,
+      routes: routes.filter((x) => x.store_id === s.id),
+      accounts: accounts.filter((x) => x.store_id === s.id),
+    })));
   });
 
   const saveStore = (id, b) => {
@@ -308,6 +329,18 @@ export function apiRouter(db) {
       if (b.ad_account_id !== undefined) {
         const account = String(b.ad_account_id || '').replace(/^act_/, '').trim() || null;
         await t.run('UPDATE stores SET ad_account_id = ? WHERE id = ?', account, id);
+      }
+      // The store's own token (and key, for My Ecom) at each company. Empty = keep.
+      for (const a of Array.isArray(b.accounts) ? b.accounts : []) {
+        if (!a.company_id) continue;
+        const token = a.api_token ? String(a.api_token).trim() : null;
+        const key = a.api_key ? String(a.api_key).trim() : null;
+        if (!token && !key && !a.clear) continue;
+        await t.run(`INSERT INTO store_accounts (store_id, company_id, api_token, api_key) VALUES (?, ?, ?, ?)
+          ON CONFLICT (store_id, company_id) DO UPDATE SET
+            api_token = CASE WHEN ? THEN NULL ELSE COALESCE(excluded.api_token, store_accounts.api_token) END,
+            api_key = CASE WHEN ? THEN NULL ELSE COALESCE(excluded.api_key, store_accounts.api_key) END`,
+        id, Number(a.company_id), token, key, Boolean(a.clear), Boolean(a.clear));
       }
       if (Array.isArray(b.routes)) {
         await t.run('DELETE FROM store_routes WHERE store_id = ?', id);

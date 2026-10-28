@@ -295,15 +295,57 @@ test('products are linked to their store from the parcels each store shipped', a
   assert.equal((await api('GET', `/api/orders/${o.id}`)).body.company_name, 'HHD test');
 });
 
-test('the 8 stores come with their own delivery account, without tokens', async () => {
-  const stores = (await api('GET', '/api/stores')).body;
+test('real company names, the user product list, and each store ships with its own token', async () => {
   const companies = (await api('GET', '/api/delivery/companies')).body;
-  for (const name of ['YACINE', 'FLAMANT ROSE', 'BOUCHRA', 'YARA', 'YALIM', 'DZIRIYA', 'AZZOU', 'YAMIR']) {
-    const s = stores.find((x) => x.name === name);
-    assert.ok(s?.company_id, name);
-    const c = companies.find((x) => x.id === s.company_id);
-    assert.ok(c.name.endsWith(` - ${name}`));
-    assert.equal(c.api_token, null);
+  for (const name of ['HHD Express', 'Packers Delivery', 'DHD Delivery', 'My Ecom Delivery']) {
+    assert.equal(companies.filter((c) => c.name === name).length, 1, name);
   }
-  assert.equal(companies.find((c) => c.name === 'HHD Express - YACINE').base_url, 'https://hhdexpress.ecotrack.dz');
+  assert.ok(!companies.some((c) => / - [A-Z ]+$/.test(c.name)), 'no per-store company rows left');
+
+  const stores = (await api('GET', '/api/stores')).body;
+  const store = (name) => stores.find((x) => x.name === name);
+  assert.equal(store('YAMIR').company_name, 'My Ecom Delivery');
+  assert.equal(store('BOUCHRA').company_name, 'DHD Delivery');
+
+  const products = (await api('GET', '/api/products')).body;
+  const product = (name) => products.find((p) => p.name === name);
+  assert.equal(products.filter((p) => p.public_key.startsWith('list-')).length, 120);
+  assert.deepEqual([product('Robe N & R').store_name, product('Robe N & R').company_name], ['AZZOU', 'Packers Delivery']);
+  // YAMIR ships this one through its Packers account, not its main My Ecom one.
+  assert.deepEqual([product('pyjama namri importation').store_name, product('pyjama namri importation').company_name], ['YAMIR', 'Packers Delivery']);
+  assert.equal(product('Basket Active 2026').store_id, null);
+
+  // The token is the store's own account at the company.
+  const packers = companies.find((c) => c.name === 'Packers Delivery');
+  await api('PUT', `/api/stores/${store('YAMIR').id}`, {
+    name: 'YAMIR', company_id: store('YAMIR').company_id, accounts: [{ company_id: packers.id, api_token: 'YAMIR-PACKERS' }],
+  });
+  const yamir = (await api('GET', '/api/stores')).body.find((x) => x.name === 'YAMIR');
+  assert.deepEqual(yamir.accounts.map((a) => [a.company_name, a.has_token]), [['Packers Delivery', true]]);
+  assert.ok(!JSON.stringify(yamir).includes('YAMIR-PACKERS'), 'tokens never sent back');
+
+  const p = product('pyjama namri importation');
+  const realFetch = globalThis.fetch;
+  let sent;
+  globalThis.fetch = async (url, init) => {
+    const u = new URL(String(url));
+    if (!u.hostname.endsWith('ecotrack.dz')) return realFetch(url, init);
+    sent = u;
+    return new Response(JSON.stringify({ success: true, tracking: 'PK-1' }), { status: 200 });
+  };
+  try {
+    const o = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'Y', phone: '0551119999', wilaya_code: 16 })).body;
+    assert.equal(o.company_name, 'Packers Delivery');
+    const d = (await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' })).body;
+    assert.equal(d.status, 'dispatched');
+    assert.equal(sent.hostname, 'packers.ecotrack.dz');
+    assert.equal(sent.searchParams.get('api_token'), 'YAMIR-PACKERS');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // Changing the product's company from the products page.
+  const dhd = companies.find((c) => c.name === 'DHD Delivery');
+  await api('PUT', `/api/products/${p.id}/store`, { company_id: dhd.id });
+  assert.equal((await api('GET', '/api/products')).body.find((x) => x.id === p.id).company_name, 'DHD Delivery');
 });
