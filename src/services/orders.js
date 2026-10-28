@@ -253,6 +253,9 @@ export async function dispatchOrder(db, id, { userId = null, tracking = null } =
   };
   if (!company) return fail('ما كاين حتى شركة توصيل مربوطة بهاد البوتيك');
   if (!company.active) return fail(`شركة التوصيل ${company.name} موقفة`);
+  if (!tracking && company.provider === 'ecotrack' && !company.api_token) {
+    return fail(`ما كاينش التوكن تاع ${order.store_name || 'البوتيك'} عند ${company.name}: حطو في صفحة البوتيكات`);
+  }
 
   const product = await db.get('SELECT * FROM products WHERE id = ?', order.product_id);
   let result;

@@ -121,7 +121,7 @@ test('dispatch failure keeps the order confirmed with the error', async () => {
   const o = (await api('POST', '/api/orders', { product_id: product.id, customer_name: 'K', phone: '0550000000', wilaya_code: 25 })).body;
   const r = (await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' })).body;
   assert.equal(r.status, 'confirmed');
-  assert.match(r.dispatch_error, /api_token/);
+  assert.match(r.dispatch_error, /التوكن/);
   const manual = (await api('POST', `/api/orders/${o.id}/dispatch`, { tracking: 'ABC123' })).body;
   assert.equal(manual.status, 'dispatched');
   assert.equal(manual.tracking, 'ABC123');
