@@ -200,6 +200,12 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         await set('cancelled', ', stock_reserved = false, closed_at = now()');
         await logEvent(t, id, 'cancelled', note, userId);
         break;
+      case 'reset':
+        // Undo no_answer/postpone: back to new, attempts start again.
+        if (!['no_answer', 'postponed'].includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
+        await set('new', ', call_attempts = 0');
+        await logEvent(t, id, 'reopened', note || 'رجعت جديدة', userId);
+        break;
       case 'reopen':
         if (!['cancelled', 'fake'].includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await set('new', ', closed_at = NULL');
@@ -277,4 +283,18 @@ export async function syncTracking(db) {
     }
   }
   return summary;
+}
+
+// A product moved to another store (branch): its orders not yet sent follow it
+// to that store's delivery company.
+export async function rerouteProductOrders(db, productId) {
+  const product = await db.get('SELECT store_id FROM products WHERE id = ?', productId);
+  if (!product) return 0;
+  const orders = await db.all(`SELECT id, wilaya_code FROM orders WHERE product_id = ? AND status IN (${EDITABLE.map(() => '?').join(', ')})`,
+    productId, ...EDITABLE);
+  for (const o of orders) {
+    const route = await resolveRoute(db, o.wilaya_code, product.store_id);
+    await db.run('UPDATE orders SET company_id = ?, updated_at = now() WHERE id = ?', route.company_id, o.id);
+  }
+  return orders.length;
 }

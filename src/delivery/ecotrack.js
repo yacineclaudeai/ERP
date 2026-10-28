@@ -14,7 +14,7 @@ export function mapEcotrackStatus(raw) {
   return 'dispatched';
 }
 
-async function call(company, method, endpoint, params) {
+async function call(company, method, endpoint, params, timeout = 20_000) {
   if (!company.base_url || !company.api_token) {
     throw new Error('Ecotrack: base_url et api_token sont obligatoires');
   }
@@ -26,7 +26,7 @@ async function call(company, method, endpoint, params) {
   const init = {
     method,
     headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeout),
   };
   if (method === 'GET') {
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
@@ -64,6 +64,18 @@ export const ecotrack = {
     const tracking = data.tracking || data.data?.tracking;
     if (!tracking) throw new Error(`Ecotrack: pas de tracking dans la réponse (${JSON.stringify(data).slice(0, 200)})`);
     return { tracking };
+  },
+
+  // One page (40 parcels) of the account's parcels created between start and end.
+  // Without dates Ecotrack only returns the last few months.
+  async listParcels(company, start, end, page = 1) {
+    const day = (d) => d.toISOString().slice(0, 10);
+    const data = await call(company, 'GET', 'get/orders', { start_date: day(start), end_date: day(end), page }, 50_000);
+    const rows = Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
+    return {
+      parcels: rows.map((r) => ({ tracking: r.tracking, products: r.products ?? r.produit ?? '' })),
+      last_page: Number(data.last_page || data.meta?.last_page || 1),
+    };
   },
 
   async getStatus(company, tracking) {

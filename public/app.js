@@ -289,9 +289,9 @@ async function ordersPage() {
       <tr><th></th><th>رقم الطلبية</th><th>التاريخ</th><th>الاسم الكامل</th><th>الهاتف</th><th>محاولات</th><th>الحالة</th>
         <th>البوتيك</th><th>التوصيل</th><th>الولاية / البلدية</th><th>المنتج</th><th>الكمية</th><th>سعر المنتج</th>
         <th>سعر التوصيل</th><th>المجموع</th><th>التفاصيل</th><th>التأكيد بواسطة</th><th>شركة التوصيل</th><th>إجراءات</th></tr>
-      ${list.rows.map((o) => orderRow(o, products, companies)).join('')}
+      ${list.rows.map((o) => orderRow(o, products, companies, stores)).join('')}
     </table></div>`);
-  bindOrderTable(main.querySelector('table.orders'), list.rows, products, companies);
+  bindOrderTable(main.querySelector('table.orders'), list.rows, products, companies, stores);
 
   main.querySelectorAll('[data-status]').forEach((b) => (b.onclick = () => go({ status: b.dataset.status })));
   main.querySelector('#filters').onsubmit = (e) => {
@@ -316,14 +316,16 @@ const EDITABLE = ['new', 'no_answer', 'postponed', 'confirmed'];
 // confirmation action that moves the order there.
 const STATUS_MOVES = {
   new: ['no_answer', 'postponed', 'confirmed', 'cancelled'],
-  no_answer: ['no_answer', 'postponed', 'confirmed', 'cancelled'],
-  postponed: ['no_answer', 'postponed', 'confirmed', 'cancelled'],
+  no_answer: ['new', 'no_answer', 'postponed', 'confirmed', 'cancelled'],
+  postponed: ['new', 'no_answer', 'postponed', 'confirmed', 'cancelled'],
   confirmed: ['cancelled'],
   cancelled: ['new'],
   fake: ['new'],
   dispatched: ['delivered', 'returned'],
 };
-const MOVE_ACTION = { no_answer: 'no_answer', postponed: 'postpone', confirmed: 'confirm', cancelled: 'cancel', new: 'reopen', delivered: 'delivered', returned: 'returned' };
+const MOVE_ACTION = { no_answer: 'no_answer', postponed: 'postpone', confirmed: 'confirm', cancelled: 'cancel', delivered: 'delivered', returned: 'returned' };
+// Back to "new": undoing no answer / postponed resets the attempts; a cancelled order is reopened.
+const moveAction = (from, to) => (to === 'new' ? (['no_answer', 'postponed'].includes(from) ? 'reset' : 'reopen') : MOVE_ACTION[to]);
 
 function statusCell(o) {
   const moves = STATUS_MOVES[o.status];
@@ -333,7 +335,7 @@ function statusCell(o) {
     `<option value="${s}" ${s === o.status ? 'selected' : ''}>${STATUS_LABELS[s]}</option>`).join('')}</select>`;
 }
 
-function orderRow(o, products, companies) {
+function orderRow(o, products, companies, stores) {
   const edit = EDITABLE.includes(o.status);
   const input = (field, value, attrs = '') => `<input class="cell" data-field="${field}" value="${esc(value)}" ${attrs}>`;
   const num = (field, value, w = 80) => input(field, value ?? '', `type="number" min="0" style="width:${w}px"`);
@@ -352,7 +354,11 @@ function orderRow(o, products, companies) {
     <td class="num nowrap">${o.call_attempts || 0}${['new', 'no_answer', 'postponed'].includes(o.status)
       ? ' <button class="btn small" data-attempt title="ما ردش: زيد محاولة">+1</button>' : ''}</td>
     <td class="nowrap">${statusCell(o)}${o.dispatch_error ? ' <span class="badge cancelled" title="' + esc(o.dispatch_error) + '">خطأ إرسال</span>' : ''}</td>
-    <td class="muted">${esc(o.store_name || '')}</td>
+    <td>${state.user.role === 'admin' && edit
+      ? `<select class="cell ${o.store_id ? '' : 'missing'}" data-store title="فرع المنتج: يتبدل للمنتج كامل">
+          <option value="">— بلا فرع —</option>
+          ${stores.map((s) => `<option value="${s.id}" ${s.id === o.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`
+      : o.store_name ? esc(o.store_name) : '<span class="neg">بلا فرع</span>'}</td>
     <td>${edit ? `<select class="cell" data-field="stop_desk"><option value="0">المنزل</option>
       <option value="1" ${o.stop_desk ? 'selected' : ''}>مكتب</option></select>` : o.stop_desk ? 'مكتب' : 'المنزل'}</td>
     <td>${edit ? `<select class="cell" data-field="wilaya_code" style="width:150px">${wilayaOptions(o.wilaya_code)}</select>
@@ -365,7 +371,7 @@ function orderRow(o, products, companies) {
     <td class="num"><b>${money(o.total)}</b></td>
     <td class="muted details">${edit ? `<textarea class="cell" data-field="notes" rows="1" style="width:180px">${esc(o.notes || '')}</textarea>` : esc(o.notes || '')}</td>
     <td class="muted">${esc(o.confirmed_by || '')}</td>
-    <td class="muted">${edit ? `<select class="cell" data-field="company_id"><option value="">حسب الولاية</option>
+    <td class="muted">${edit ? `<select class="cell ${o.company_id ? '' : 'missing'}" data-field="company_id"><option value="">— بلا شركة —</option>
       ${companies.map((c) => `<option value="${c.id}" ${c.id === o.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`
       : esc(o.company_name || '')} ${esc(o.tracking || '')}</td>
     <td class="nowrap">
@@ -376,11 +382,11 @@ function orderRow(o, products, companies) {
 }
 
 // Every change in the table is saved right away, then only that row is redrawn.
-function bindOrderTable(table, rows, products, companies) {
+function bindOrderTable(table, rows, products, companies, stores) {
   const byId = new Map(rows.map((o) => [o.id, o]));
   const redraw = (tr, o) => {
     byId.set(o.id, o);
-    tr.outerHTML = orderRow(o, products, companies);
+    tr.outerHTML = orderRow(o, products, companies, stores);
   };
   const save = async (tr, request) => {
     const id = Number(tr.dataset.id);
@@ -403,8 +409,18 @@ function bindOrderTable(table, rows, products, companies) {
     const el = e.target;
     const tr = el.closest('tr[data-id]');
     if (!tr) return;
+    if (el.matches('[data-store]')) {
+      const o = byId.get(Number(tr.dataset.id));
+      const name = el.selectedOptions[0].textContent.trim();
+      if (!confirm(`المنتج "${o.product_name}" يولي في الفرع ${name}، والطلبيات تاعو اللي مازال ما تبعثوش يتبعوه. نكمل؟`)) return redraw(tr, o);
+      return guard(async () => {
+        const r = await api('PUT', `/products/${o.product_id}/store`, { store_id: el.value || null });
+        toast(`تم: ${r.orders} طلبية تبدلت شركة التوصيل تاعها`);
+        router();
+      })();
+    }
     if (el.matches('[data-move]')) {
-      const action = MOVE_ACTION[el.value];
+      const action = moveAction(byId.get(Number(tr.dataset.id)).status, el.value);
       if (action === 'cancel' && !confirm('تأكيد إلغاء الطلبية؟')) return redraw(tr, byId.get(Number(tr.dataset.id)));
       return save(tr, (id) => api('POST', `/orders/${id}/action`, { action }));
     }
@@ -466,6 +482,7 @@ async function openOrder(id) {
       ${o.status === 'dispatched' ? `
         <button class="btn primary" data-action="delivered">مستلمة</button>
         <button class="btn danger" data-action="returned">روتور</button>` : ''}
+      ${['no_answer', 'postponed'].includes(o.status) ? '<button class="btn" data-action="reset">رجعها جديدة</button>' : ''}
       ${o.status === 'cancelled' ? '<button class="btn" data-action="reopen">إعادة فتح</button>' : ''}
       ${['new', 'no_answer', 'postponed', 'confirmed'].includes(o.status) ? '<button class="btn" data-edit>تعديل</button>' : ''}
       <button class="btn" data-close>إغلاق</button>
@@ -547,13 +564,49 @@ async function orderForm(order, products) {
   });
 }
 
+// Reads each store's parcels page by page (each page is one short request),
+// then links every product to the store that ships it.
+async function linkStoresDialog(stores) {
+  const box = modal.open(`<h3>ربط المنتجات بالفروع</h3>
+    <p class="muted">نقراو الطرود تاع آخر 60 يوم عند شركة التوصيل تاع كل فرع. ما نبعثو والو ما نبدلو والو عندهم.</p>
+    <ul class="timeline" id="link-log"></ul><div class="actions"><button class="btn" data-close>إغلاق</button></div>`);
+  const log = (html) => box.querySelector('#link-log').insertAdjacentHTML('beforeend', `<li>${html}</li>`);
+  const texts = {};
+  for (const s of stores) {
+    if (!s.company_id) {
+      log(`${esc(s.name)}: <span class="muted">ما عندهاش شركة توصيل</span>`);
+      continue;
+    }
+    texts[s.id] = [];
+    let page = 1;
+    let last = 1;
+    try {
+      do {
+        const r = await api('POST', '/branches/scan', { store_id: s.id, page });
+        texts[s.id].push(...r.texts);
+        last = Math.min(r.last_page, 15);
+        page += 1;
+      } while (page <= last);
+      log(`${esc(s.name)}: ${texts[s.id].length} طرد`);
+    } catch (err) {
+      log(`<span class="neg">${esc(err.message)}</span>`);
+    }
+  }
+  const r = await api('POST', '/branches/apply', { texts });
+  log(`<b>${r.linked.length} منتج تربط</b>${r.kept ? `، ${r.kept} كانو مربوطين صح` : ''}`);
+  r.linked.forEach((l) => log(`${esc(l.product)} ← ${esc(l.to)}${l.from ? ` <span class="muted">(كان ${esc(l.from)})</span>` : ''}${l.orders ? ` · ${l.orders} طلبية` : ''}`));
+  if (r.unmatched.length) log(`<span class="neg">ما لقيناش الفرع تاع:</span> ${r.unmatched.map(esc).join('، ')}`);
+  box.querySelector('[data-close]').onclick = () => { modal.close(); router(); };
+}
+
 // ---------- products ----------
 async function productsPage() {
   const [products, stores] = await Promise.all([api('GET', '/products'), api('GET', '/stores')]);
   const isAdmin = state.user.role === 'admin';
   const main = shell(`
     <h2>المنتجات</h2>
-    ${isAdmin ? '<div class="bar"><button class="btn primary" id="add">+ منتج جديد</button></div>' : ''}
+    ${isAdmin ? `<div class="bar"><button class="btn primary" id="add">+ منتج جديد</button>
+      <button class="btn" id="link-stores" title="يقرا الطرود اللي بعثها كل فرع عند شركة التوصيل تاعو، ويعرف منها كل منتج لأنهي فرع">ربط المنتجات بالفروع تلقائياً</button></div>` : ''}
     <div class="table-wrap"><table>
       <tr><th>المنتج</th><th>البوتيك</th><th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
       ${products.map((p) => `<tr>
@@ -573,6 +626,8 @@ async function productsPage() {
   const byId = (id) => products.find((p) => p.id === Number(id));
   const add = main.querySelector('#add');
   if (add) add.onclick = () => productForm(null, stores);
+  const link = main.querySelector('#link-stores');
+  if (link) link.onclick = guard(() => linkStoresDialog(stores));
   main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => productForm(byId(b.dataset.edit), stores)));
   main.querySelectorAll('[data-embed]').forEach((b) => (b.onclick = () => embedDialog(byId(b.dataset.embed))));
   main.querySelectorAll('[data-stock]').forEach((b) => (b.onclick = guard(() => stockDialog(byId(b.dataset.stock)))));

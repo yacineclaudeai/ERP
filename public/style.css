@@ -111,3 +111,4 @@ table.orders .cell { padding: 4px 6px; font-size: 13px; border-radius: 6px; widt
 table.orders textarea.cell { resize: vertical; min-height: 30px; }
 table.orders select.st { border: 0; cursor: pointer; padding: 4px 8px; border-radius: 12px; }
 table.orders tr.saving { opacity: .5; pointer-events: none; }
+table.orders select.missing { border-color: var(--danger); color: var(--danger); }

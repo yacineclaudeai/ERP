@@ -6,12 +6,13 @@ import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
 import {
   STATUSES, HttpError, getOrder, createOrder, updateOrder, applyAction,
-  confirmAndDispatch, dispatchOrder, syncTracking,
+  confirmAndDispatch, dispatchOrder, syncTracking, rerouteProductOrders,
 } from '../services/orders.js';
 import { getStats, localDay } from '../services/stats.js';
 import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
+import { scanStore, applyStoreLinks } from '../services/branches.js';
 import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet } from '../services/sheets.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
@@ -99,12 +100,30 @@ export function apiRouter(db) {
       UPDATE products SET name = ?, sku = ?, price = ?, cost = ?, landing_url = ?, store_id = ?, active = ? WHERE id = ?`,
       f.name, f.sku, f.price, f.cost, f.landing_url, f.store_id, f.active, id);
     if (!changes) throw new HttpError(404, 'المنتج غير موجود');
+    await rerouteProductOrders(db, id);
     // Only touch the ad fields the caller sends, so older forms do not wipe them.
     for (const key of ['ad_daily_budget', 'ad_creative_folder']) {
       if (b[key] !== undefined) await db.run(`UPDATE products SET ${key} = ? WHERE id = ?`, f[key], id);
     }
     return c.json(await db.get('SELECT * FROM products WHERE id = ?', id));
   });
+
+  // Move a product to a store (branch) from the orders table; its open orders follow.
+  r.put('/products/:id/store', requireAdmin, async (c) => {
+    const id = idParam(c);
+    const storeId = body(c).store_id ? Number(body(c).store_id) : null;
+    if (storeId && !await db.get('SELECT id FROM stores WHERE id = ?', storeId)) throw new HttpError(404, 'البوتيك غير موجود');
+    const { changes } = await db.run('UPDATE products SET store_id = ? WHERE id = ?', storeId, id);
+    if (!changes) throw new HttpError(404, 'المنتج غير موجود');
+    return c.json({ orders: await rerouteProductOrders(db, id) });
+  });
+
+  // Link products to stores from the parcels each store already shipped.
+  r.post('/branches/scan', requireAdmin, async (c) => {
+    const b = body(c);
+    return c.json(await scanStore(db, Number(b.store_id), Math.max(1, Number(b.page) || 1)));
+  });
+  r.post('/branches/apply', requireAdmin, async (c) => c.json(await applyStoreLinks(db, body(c).texts)));
 
   r.post('/products/:id/regenerate-key', requireAdmin, async (c) => {
     const { rows: [p] } = await db.run('UPDATE products SET public_key = ? WHERE id = ? RETURNING *', newKey(), idParam(c));
@@ -157,7 +176,7 @@ export function apiRouter(db) {
     const offset = Math.max(0, Number(q.offset) || 0);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = await db.all(`
-      SELECT o.*, p.name AS product_name, s.name AS store_name, c.name AS company_name,
+      SELECT o.*, p.name AS product_name, p.store_id, s.name AS store_name, c.name AS company_name,
         (SELECT u.username FROM order_events e JOIN users u ON u.id = e.user_id
           WHERE e.order_id = o.id AND e.type = 'confirmed' ORDER BY e.id DESC LIMIT 1) AS confirmed_by
       FROM orders o JOIN products p ON p.id = o.product_id

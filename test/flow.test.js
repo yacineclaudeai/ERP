@@ -238,3 +238,59 @@ test('a confirmation agent edits an order from the table, product included', asy
   assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: a.id })).status, 409);
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
 });
+
+test('no answer or postponed can go back to new', async () => {
+  const p = (await api('POST', '/api/products', { name: 'Reset', price: 1000 })).body;
+  const o = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'R', phone: '0551239876', wilaya_code: 16 })).body;
+  await api('POST', `/api/orders/${o.id}/action`, { action: 'no_answer' });
+  await api('POST', `/api/orders/${o.id}/action`, { action: 'no_answer' });
+  const r = (await api('POST', `/api/orders/${o.id}/action`, { action: 'reset' })).body;
+  assert.equal(r.status, 'new');
+  assert.equal(r.call_attempts, 0);
+  assert.equal((await api('POST', `/api/orders/${o.id}/action`, { action: 'reset' })).status, 409);
+});
+
+test('products are linked to their store from the parcels each store shipped', async () => {
+  const eco = (await api('POST', '/api/delivery/companies', {
+    name: 'Packers test', provider: 'ecotrack', base_url: 'https://packers-test.ecotrack.dz', api_token: 'T1',
+  })).body;
+  const hhd = (await api('POST', '/api/delivery/companies', { name: 'HHD test', provider: 'sandbox' })).body;
+  const azzou = (await api('POST', '/api/stores', { name: 'AZZOU', company_id: eco.id })).body;
+  const other = (await api('POST', '/api/stores', { name: 'SANS API', company_id: hhd.id })).body;
+  const ring = (await api('POST', '/api/products', { name: 'Bague Lune', price: 1900 })).body;
+  const none = (await api('POST', '/api/products', { name: 'Jamais Vendu', price: 100 })).body;
+  const o = (await api('POST', '/api/orders', { product_id: ring.id, customer_name: 'B', phone: '0551230000', wilaya_code: 16 })).body;
+
+  const realFetch = globalThis.fetch;
+  const pages = {
+    1: { data: [{ tracking: 'A1', products: 'Bague lune x1' }, { tracking: 'A2', products: 'BAGUE LUNE (2)' }], last_page: 2 },
+    2: { data: [{ tracking: 'A3', products: 'Autre chose' }], last_page: 2 },
+  };
+  globalThis.fetch = async (url, init) => {
+    const u = new URL(String(url));
+    if (!u.hostname.endsWith('ecotrack.dz')) return realFetch(url, init);
+    assert.equal(u.pathname, '/api/v1/get/orders');
+    assert.equal(u.searchParams.get('api_token'), 'T1');
+    assert.ok(u.searchParams.get('start_date') && u.searchParams.get('end_date'));
+    return new Response(JSON.stringify(pages[u.searchParams.get('page')]), { status: 200 });
+  };
+  try {
+    const p1 = (await api('POST', '/api/branches/scan', { store_id: azzou.id, page: 1 })).body;
+    assert.equal(p1.last_page, 2);
+    const p2 = (await api('POST', '/api/branches/scan', { store_id: azzou.id, page: 2 })).body;
+    assert.equal((await api('POST', '/api/branches/scan', { store_id: other.id })).status, 400, 'sandbox has no parcel list');
+    const r = (await api('POST', '/api/branches/apply', { texts: { [azzou.id]: [...p1.texts, ...p2.texts] } })).body;
+    assert.deepEqual(r.linked.map((l) => [l.product, l.to, l.orders]), [['Bague Lune', 'AZZOU', 1]]);
+    assert.ok(r.unmatched.includes(none.name));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const after = (await api('GET', `/api/orders/${o.id}`)).body;
+  assert.equal(after.store_name, 'AZZOU');
+  assert.equal(after.company_name, 'Packers test', 'open orders follow the product to its store company');
+
+  // By hand from the orders table.
+  const moved = (await api('PUT', `/api/products/${ring.id}/store`, { store_id: other.id })).body;
+  assert.equal(moved.orders, 1);
+  assert.equal((await api('GET', `/api/orders/${o.id}`)).body.company_name, 'HHD test');
+});
