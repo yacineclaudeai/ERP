@@ -60,20 +60,29 @@ export function parseSheetUrl(url) {
   return { id, gid, csvUrl: `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${gid}` };
 }
 
+// The CSV export first; some sheets answer it with "400 Bad Request" even when shared,
+// so the Visualization API's CSV output (same data, values typed per column) is the fallback.
 export async function fetchSheetRows(url) {
-  const { csvUrl } = parseSheetUrl(url);
-  let res;
-  try {
-    res = await fetch(csvUrl, { redirect: 'follow' });
-  } catch (e) {
-    throw new HttpError(400, `ما قدرناش نوصلو للشيت: ${e.message}`);
+  const { id, gid, csvUrl } = parseSheetUrl(url);
+  const tries = [csvUrl, `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&headers=1&gid=${gid}`];
+  let shared = false;
+  for (const u of tries) {
+    let res;
+    try {
+      res = await fetch(u, { redirect: 'follow' });
+    } catch (e) {
+      throw new HttpError(400, `ما قدرناش نوصلو للشيت: ${e.message}`);
+    }
+    const type = res.headers.get('content-type') || '';
+    if (res.ok && !type.includes('text/html')) return parseCsv(await res.text());
+    // A sheet that isn't shared sends us to the Google sign-in page.
+    if (!/accounts\.google\.com/.test(res.url)) shared = true;
+    const title = type.includes('text/html') ? (await res.text()).match(/<title>([^<]*)/i)?.[1] : '';
+    console.warn('sheet not readable', u.split('?')[0], res.status, type, res.url.split('?')[0], title);
   }
-  const type = res.headers.get('content-type') || '';
-  if (!res.ok || type.includes('text/html')) {
-    console.warn('sheet not readable', res.status, type, res.url.split('?')[0]);
-    throw new HttpError(400, 'الشيت ماهوش مشارك: دير Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur');
-  }
-  return parseCsv(await res.text());
+  throw new HttpError(400, shared
+    ? 'Google رفض يعطي الشيت. تأكد من الرابط (الورقة الصحيحة)، وعاود بعد شوية'
+    : 'الشيت ماهوش مشارك: دير Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur');
 }
 
 // Header name per field: exact names first, in the order listed (so "Shipping City" wins over "City"),

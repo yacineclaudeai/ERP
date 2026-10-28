@@ -18,7 +18,7 @@ const csv = (rows) => toCsv([HEADERS, ...rows]);
 const sheets = {};
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
-  const m = String(url).match(/docs\.google\.com\/spreadsheets\/d\/([^/]+)\/export/);
+  const m = String(url).match(/docs\.google\.com\/spreadsheets\/d\/([^/]+)\/(export|gviz)/);
   if (!m) return realFetch(url, init);
   if (!sheets[m[1]]) return new Response('<html>login</html>', { headers: { 'content-type': 'text/html' } });
   return new Response(sheets[m[1]], { headers: { 'content-type': 'text/csv' } });
