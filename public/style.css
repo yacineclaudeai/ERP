@@ -67,6 +67,7 @@ td.num { font-variant-numeric: tabular-nums; }
 .badge.dispatched { background: #e0f2fe; color: #0369a1; }
 .badge.delivered { background: #dcfce7; color: #15803d; }
 .badge.returned { background: #fce7f3; color: #be185d; }
+.badge.fake { background: #f1f5f9; color: #475569; text-decoration: line-through; }
 .badge.warn { background: #fef3c7; color: var(--warn); }
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

@@ -2,7 +2,8 @@ import { getSetting } from '../db.js';
 import { isValidWilaya } from '../wilayas.js';
 import { getProvider } from '../delivery/index.js';
 
-export const STATUSES = ['new', 'no_answer', 'postponed', 'confirmed', 'cancelled', 'dispatched', 'delivered', 'returned'];
+// 'fake' comes from a fake-orders sheet: kept for the stats, never confirmed or shipped.
+export const STATUSES = ['new', 'no_answer', 'postponed', 'confirmed', 'cancelled', 'dispatched', 'delivered', 'returned', 'fake'];
 const OPEN = ['new', 'no_answer', 'postponed'];
 const EDITABLE = [...OPEN, 'confirmed'];
 
@@ -88,7 +89,8 @@ function validateOrderFields(input) {
   };
 }
 
-export async function createOrder(db, input, { source = 'manual', userId = null } = {}) {
+// sheet: { source_id, external_id, name } for an order imported from a Google Sheet.
+export async function createOrder(db, input, { source = 'manual', userId = null, sheet = null } = {}) {
   const product = input.product_id != null
     ? await db.get('SELECT * FROM products WHERE id = ?', Number(input.product_id) || 0)
     : await db.get('SELECT * FROM products WHERE public_key = ?', String(input.key ?? ''));
@@ -96,28 +98,31 @@ export async function createOrder(db, input, { source = 'manual', userId = null 
 
   const f = validateOrderFields(input);
   const route = await resolveRoute(db, f.wilaya_code, product.store_id);
-  const unit_price = input.unit_price != null && source !== 'landing' ? Number(input.unit_price) : product.price;
-  const delivery_fee = f.stop_desk ? route.desk_fee : route.home_fee;
-  const total = unit_price * f.quantity + delivery_fee;
+  const trusted = source !== 'landing';
+  const unit_price = input.unit_price != null && trusted ? Number(input.unit_price) : product.price;
+  const delivery_fee = input.delivery_fee != null && trusted ? Number(input.delivery_fee) : f.stop_desk ? route.desk_fee : route.home_fee;
+  const total = input.total != null && trusted ? Number(input.total) : unit_price * f.quantity + delivery_fee;
+  const status = sheet && input.status === 'fake' ? 'fake' : 'new';
 
   return db.tx(async (t) => {
     const dup = await t.get(`
       SELECT id FROM orders
-      WHERE phone = ? AND product_id = ? AND created_at >= now() - interval '3 days'
+      WHERE phone = ? AND product_id = ? AND status <> 'fake' AND created_at >= now() - interval '3 days'
       ORDER BY id LIMIT 1`, f.phone, product.id);
 
     const { rows: [{ id }] } = await t.run(`
       INSERT INTO orders (product_id, quantity, unit_price, delivery_fee, total, customer_name, phone, phone2,
         wilaya_code, commune, address, stop_desk, notes, source, landing_url, utm_source, utm_campaign,
-        duplicate_of, company_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        duplicate_of, company_id, status, sheet_source_id, external_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       product.id, f.quantity, unit_price, delivery_fee, total, f.customer_name, f.phone, f.phone2,
       f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes, source,
       input.landing_url ?? null, input.utm_source ?? null, input.utm_campaign ?? null,
-      dup?.id ?? null, route.company_id,
+      dup?.id ?? null, route.company_id, status, sheet?.source_id ?? null, sheet?.external_id ?? null,
     );
     await t.run('UPDATE orders SET reference = ? WHERE id = ?', `CMD-${String(id).padStart(6, '0')}`, id);
-    await logEvent(t, id, 'created', source === 'landing' ? 'من صفحة الهبوط' : 'يدوياً', userId);
+    const origin = sheet ? `من الشيت ${sheet.name}` : source === 'landing' ? 'من صفحة الهبوط' : 'يدوياً';
+    await logEvent(t, id, 'created', origin, userId);
     if (dup) await logEvent(t, id, 'duplicate', `طلبية مكررة محتملة (#${dup.id})`);
     return getOrder(t, id);
   });
@@ -188,7 +193,7 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         await logEvent(t, id, 'cancelled', note, userId);
         break;
       case 'reopen':
-        if (order.status !== 'cancelled') throw new HttpError(409, 'الحالة لا تسمح');
+        if (!['cancelled', 'fake'].includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await set('new', ', closed_at = NULL');
         await logEvent(t, id, 'reopened', note, userId);
         break;

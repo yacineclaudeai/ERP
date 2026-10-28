@@ -2,7 +2,7 @@
 
 const STATUS_LABELS = {
   new: 'جديدة', no_answer: 'ما ردش', postponed: 'مؤجلة', confirmed: 'مؤكدة', cancelled: 'ملغاة',
-  dispatched: 'عند التوصيل', delivered: 'مستلمة', returned: 'روتور',
+  dispatched: 'عند التوصيل', delivered: 'مستلمة', returned: 'روتور', fake: 'وهمية',
 };
 const EVENT_LABELS = {
   created: 'تسجلت', duplicate: 'مكررة؟', no_answer: 'ما ردش', postponed: 'تأجلت', confirmed: 'تأكدت',
@@ -84,6 +84,7 @@ const NAV = [
   ['#/orders', 'الطلبيات'],
   ['#/products', 'المنتجات'],
   ['#/stores', 'البوتيكات', 'admin'],
+  ['#/sheets', 'الشيتات', 'admin'],
   ['#/delivery', 'التوصيل', 'admin'],
   ['#/ads', 'مصاريف الإشهار', 'admin'],
   ['#/users', 'المستخدمين', 'admin'],
@@ -116,6 +117,7 @@ const ROUTES = {
   '#/orders': ordersPage,
   '#/products': productsPage,
   '#/stores': storesPage,
+  '#/sheets': sheetsPage,
   '#/delivery': deliveryPage,
   '#/ads': adsPage,
   '#/users': usersPage,
@@ -684,6 +686,115 @@ function storeForm(store, companies) {
       })),
     };
     await (store ? api('PUT', `/stores/${store.id}`, body) : api('POST', '/stores', body));
+    modal.close();
+    toast('تم الحفظ');
+    router();
+  });
+}
+
+// ---------- Google Sheets ----------
+const SHEET_FIELD_LABELS = {
+  customer_name: 'الاسم الكامل *', phone: 'رقم الهاتف *', product_name: 'اسم المنتج *', external_id: 'رقم الطلبية',
+  address: 'العنوان', delivery_type: 'نوعية التوصيل', wilaya: 'الولاية *', commune: 'البلدية',
+  subtotal: 'سعر المنتج', quantity: 'الكمية', shipping_price: 'سعر التوصيل', discount: 'تخفيض',
+  total: 'السعر الكلي', notes: 'ملاحظة', phone2: 'هاتف 02', sku: 'SKU',
+};
+
+async function sheetsPage() {
+  const [sheets, stores] = await Promise.all([api('GET', '/sheets'), api('GET', '/stores')]);
+  const main = shell(`
+    <h2>الشيتات</h2>
+    <p class="muted">الطلبيات تدخل وحدها من Google Sheets (كيما LightFunnels) كل 5 دقايق. الشيت لازم يكون مشارك: Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur. الطلبيات اللي تجي من شيت وهمي تدخل بحالة "وهمية" وما تتبعثش للتوصيل.</p>
+    <div class="bar"><button class="btn primary" id="add">+ شيت</button></div>
+    <div class="table-wrap"><table>
+      <tr><th>الشيت</th><th>البوتيك</th><th>النوع</th><th>دخلو</th><th>آخر مرة</th><th>أخطاء</th><th></th></tr>
+      ${sheets.map((g) => `<tr><td>${esc(g.name)}${g.active ? '' : ' <span class="badge">متوقف</span>'}</td>
+        <td>${esc(g.store_name || '—')}</td>
+        <td>${g.kind === 'fake' ? badge('fake') : 'حقيقية'}</td>
+        <td class="num">${g.imported_count}</td>
+        <td class="muted">${fmtDate(g.last_sync_at) || '—'}<br>السطر ${g.last_row || g.start_row - 1}</td>
+        <td class="muted" style="white-space:pre-line;color:var(--danger)">${esc(g.last_error || '')}</td>
+        <td class="actions"><button class="btn small" data-sync="${g.id}">جيب دوكا</button>
+          <button class="btn small" data-edit="${g.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">زيد الشيت الأول</td></tr>'}
+    </table></div>`);
+  main.querySelector('#add').onclick = () => sheetForm(null, stores);
+  main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => sheetForm(sheets.find((g) => g.id === Number(b.dataset.edit)), stores)));
+  main.querySelectorAll('[data-sync]').forEach((b) => (b.onclick = guard(async () => {
+    b.disabled = true;
+    const r = await api('POST', `/sheets/${b.dataset.sync}/sync`);
+    toast(`دخلو ${r.imported} طلبية${r.errors.length ? `، ${r.errors.length} أخطاء` : ''}`, r.errors.length > 0);
+    router();
+  })));
+}
+
+function sheetForm(sheet, stores) {
+  const x = sheet || { kind: 'real', mapping: {}, start_row: 2, active: true };
+  const box = modal.open(`
+    <h3>${sheet ? `تعديل ${esc(sheet.name)}` : 'شيت جديد'}</h3>
+    <form class="stack" id="sheet-form">
+      <div class="grid2">
+        <label>الاسم<input name="name" value="${esc(x.name)}" placeholder="yacine boutique" required></label>
+        <label>البوتيك<select name="store_id"><option value="">—</option>${stores.map((s) =>
+          `<option value="${s.id}" ${s.id === x.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+        <label>النوع<select name="kind"><option value="real">طلبيات حقيقية</option>
+          <option value="fake" ${x.kind === 'fake' ? 'selected' : ''}>طلبيات وهمية</option></select></label>
+        <label>الحالة<select name="active"><option value="true">يخدم</option>
+          <option value="false" ${x.active ? '' : 'selected'}>متوقف</option></select></label>
+      </div>
+      <label>رابط الشيت<div class="actions"><input name="sheet_url" value="${esc(x.sheet_url)}" style="flex:1" dir="ltr" required>
+        <button class="btn" type="button" id="read">قرا الأعمدة</button></div></label>
+      <div id="mapping" class="muted">لصق الرابط واضغط "قرا الأعمدة".</div>
+      <div class="actions">
+        <button class="btn primary">حفظ</button>
+        ${sheet ? '<button class="btn danger" type="button" data-delete>حذف</button>' : ''}
+        <button class="btn" type="button" data-close>إلغاء</button>
+      </div>
+    </form>`);
+  const form = box.querySelector('#sheet-form');
+  const mappingBox = box.querySelector('#mapping');
+  const renderMapping = (headers, mapping, startRow, rows) => {
+    const options = (selected) => `<option value="">— ما كاش</option>${headers.map((h) =>
+      `<option ${h === selected ? 'selected' : ''}>${esc(h)}</option>`).join('')}`;
+    mappingBox.className = 'stack';
+    mappingBox.innerHTML = `
+      <div class="grid2">${Object.entries(SHEET_FIELD_LABELS).map(([f, label]) =>
+        `<label>${label}<select data-field="${f}">${options(mapping[f])}</select></label>`).join('')}</div>
+      <label>البداية من السطر<input name="start_row" type="number" min="2" value="${startRow}"></label>
+      ${rows ? `<div class="muted">الشيت فيه ${rows - 1} طلبية. باش تدخل غير الطلبيات الجداد خلي ${rows + 1}، ولا نقص الرقم باش تدخل القدام.</div>` : ''}`;
+  };
+  const read = guard(async () => {
+    const r = await api('POST', '/sheets/preview', { sheet_url: form.sheet_url.value });
+    const mapping = sheet ? { ...r.mapping, ...sheet.mapping } : r.mapping;
+    renderMapping(r.headers, mapping, sheet ? sheet.start_row : r.next_row, r.rows);
+  });
+  box.querySelector('#read').onclick = read;
+  if (sheet) {
+    renderMapping([...new Set(Object.values(sheet.mapping))], sheet.mapping, sheet.start_row, 0);
+    read();
+  }
+  const del = box.querySelector('[data-delete]');
+  if (del) {
+    del.onclick = guard(async () => {
+      if (!confirm('حذف الشيت؟ الطلبيات اللي دخلت تبقى.')) return;
+      await api('DELETE', `/sheets/${sheet.id}`);
+      modal.close();
+      router();
+    });
+  }
+  form.onsubmit = guard(async (e) => {
+    e.preventDefault();
+    const selects = [...mappingBox.querySelectorAll('[data-field]')];
+    if (!selects.length) return toast('اضغط "قرا الأعمدة" الأول', true);
+    const body = {
+      name: form.elements.name.value,
+      store_id: form.store_id.value || null,
+      kind: form.kind.value,
+      active: form.active.value === 'true',
+      sheet_url: form.sheet_url.value,
+      start_row: form.start_row.value,
+      mapping: Object.fromEntries(selects.map((sel) => [sel.dataset.field, sel.value]).filter(([, v]) => v)),
+    };
+    await (sheet ? api('PUT', `/sheets/${sheet.id}`, body) : api('POST', '/sheets', body));
     modal.close();
     toast('تم الحفظ');
     router();

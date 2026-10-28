@@ -25,7 +25,8 @@ export async function getStats(db, { from = null, to = null } = {}) {
 
   const products = await db.all(`
     SELECT p.id, p.name, p.stock, p.cost, p.store_id, s.name AS store_name,
-      COUNT(o.id) AS orders,
+      COUNT(o.id) FILTER (WHERE o.status <> 'fake') AS orders,
+      COUNT(o.id) FILTER (WHERE o.status = 'fake') AS fake,
       COUNT(o.id) FILTER (WHERE o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed,
       COUNT(o.id) FILTER (WHERE o.status = 'cancelled') AS cancelled,
       COUNT(o.id) FILTER (WHERE o.status = 'delivered') AS delivered,
@@ -66,12 +67,12 @@ export async function getStats(db, { from = null, to = null } = {}) {
   const byWilaya = await db.all(`
     SELECT wilaya_code, COUNT(*) AS orders, COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
       COUNT(*) FILTER (WHERE status = 'returned') AS returned
-    FROM orders o WHERE ${r.sql} GROUP BY wilaya_code ORDER BY orders DESC`, ...r.args);
+    FROM orders o WHERE ${r.sql} AND status <> 'fake' GROUP BY wilaya_code ORDER BY orders DESC`, ...r.args);
 
   const daily = await db.all(`
     SELECT ${localDay('created_at')} AS day, COUNT(*) AS orders,
       COUNT(*) FILTER (WHERE status IN ('confirmed','dispatched','delivered','returned')) AS confirmed
-    FROM orders WHERE created_at >= now() - interval '29 days' GROUP BY day ORDER BY day`);
+    FROM orders WHERE created_at >= now() - interval '29 days' AND status <> 'fake' GROUP BY day ORDER BY day`);
 
   const totals = perProduct.reduce(
     (t, p) => ({ revenue: t.revenue + p.revenue, cogs: t.cogs + p.cogs, ad_spend: t.ad_spend + p.ad_spend, profit: t.profit + p.profit }),
@@ -87,7 +88,8 @@ export async function getStats(db, { from = null, to = null } = {}) {
 
   return {
     by_status: byStatus,
-    orders: Object.values(byStatus).reduce((a, b) => a + b, 0),
+    orders: Object.values(byStatus).reduce((a, b) => a + b, 0) - n('fake'),
+    fake: n('fake'),
     confirmation_rate: pct(confirmed, decided),
     delivery_rate: pct(n('delivered'), closedShipments),
     ...totals,

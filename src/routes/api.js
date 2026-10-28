@@ -12,6 +12,7 @@ import { getStats, localDay } from '../services/stats.js';
 import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
+import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet } from '../services/sheets.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
 const idParam = (c) => Math.max(0, Math.floor(Number(c.req.param('id')))) || 0;
@@ -305,6 +306,51 @@ export function apiRouter(db) {
   r.delete('/stores/:id', requireAdmin, async (c) => {
     await db.run('DELETE FROM stores WHERE id = ?', idParam(c));
     return c.json({ ok: true });
+  });
+
+  // ---- Google Sheets order sources ----
+  r.get('/sheets', requireAdmin, async (c) => c.json(await db.all(`
+    SELECT g.*, s.name AS store_name FROM sheet_sources g LEFT JOIN stores s ON s.id = g.store_id ORDER BY g.id`)));
+
+  // Reads the sheet's header row so the UI can map columns; start_row defaults to the next new row.
+  r.post('/sheets/preview', requireAdmin, async (c) => {
+    const rows = await fetchSheetRows(body(c).sheet_url);
+    const headers = rows[0] || [];
+    return c.json({ headers, rows: rows.length, next_row: rows.length + 1, mapping: suggestMapping(headers), fields: Object.keys(SHEET_FIELDS) });
+  });
+
+  const sheetInput = (b) => {
+    const name = String(b.name || '').trim();
+    const sheetUrl = String(b.sheet_url || '').trim();
+    if (!name || !sheetUrl) throw new HttpError(400, 'الاسم والرابط ضروريين');
+    const mapping = Object.fromEntries(Object.entries(b.mapping || {})
+      .filter(([f, h]) => SHEET_FIELDS[f] && h).map(([f, h]) => [f, String(h)]));
+    return [name, sheetUrl, b.store_id ? Number(b.store_id) : null, b.kind === 'fake' ? 'fake' : 'real',
+      JSON.stringify(mapping), Math.max(2, Math.floor(Number(b.start_row)) || 2), b.active !== false && b.active !== 'false'];
+  };
+  r.post('/sheets', requireAdmin, async (c) => {
+    const { rows } = await db.run(`INSERT INTO sheet_sources (name, sheet_url, store_id, kind, mapping, start_row, active)
+      VALUES (?, ?, ?, ?, ?::jsonb, ?, ?) RETURNING id`, ...sheetInput(body(c)));
+    return c.json({ id: rows[0].id }, 201);
+  });
+  // Changing the start row restarts reading from there; rows already imported are never imported twice.
+  r.put('/sheets/:id', requireAdmin, async (c) => {
+    const id = idParam(c);
+    const old = await db.get('SELECT start_row FROM sheet_sources WHERE id = ?', id);
+    if (!old) throw new HttpError(404, 'الشيت غير موجود');
+    const v = sheetInput(body(c));
+    await db.run(`UPDATE sheet_sources SET name = ?, sheet_url = ?, store_id = ?, kind = ?, mapping = ?::jsonb, start_row = ?, active = ?
+      ${v[5] !== old.start_row ? ', last_row = 0' : ''} WHERE id = ?`, ...v, id);
+    return c.json({ id });
+  });
+  r.delete('/sheets/:id', requireAdmin, async (c) => {
+    await db.run('DELETE FROM sheet_sources WHERE id = ?', idParam(c));
+    return c.json({ ok: true });
+  });
+  r.post('/sheets/:id/sync', requireAdmin, async (c) => {
+    const source = await db.get('SELECT * FROM sheet_sources WHERE id = ?', idParam(c));
+    if (!source) throw new HttpError(404, 'الشيت غير موجود');
+    return c.json(await syncSheet(db, source));
   });
 
   // ---- ad spend (Meta Ads etc.) ----
