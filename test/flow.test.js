@@ -153,7 +153,7 @@ test('a store ships through its own account, with per-wilaya exceptions', async 
   const hhd = (await api('POST', '/api/delivery/companies', { name: 'HHD', provider: 'sandbox' })).body;
   const dhd = (await api('POST', '/api/delivery/companies', { name: 'DHD', provider: 'sandbox' })).body;
   const store = (await api('POST', '/api/stores', {
-    name: 'YACINE', company_id: hhd.id, routes: [{ wilaya_code: 35, company_id: dhd.id }],
+    name: 'BOUTIQUE TEST', company_id: hhd.id, routes: [{ wilaya_code: 35, company_id: dhd.id }],
   })).body;
   const product = (await api('POST', '/api/products', { name: 'Parfum', price: 2900, stock: 5, store_id: store.id })).body;
 
@@ -165,9 +165,9 @@ test('a store ships through its own account, with per-wilaya exceptions', async 
   assert.equal((await send(35)).company_name, 'DHD');
 
   const stores = (await api('GET', '/api/stores')).body;
-  assert.equal(stores.find((s) => s.name === 'YACINE').routes.length, 1);
+  assert.equal(stores.find((s) => s.name === 'BOUTIQUE TEST').routes.length, 1);
   const stats = (await api('GET', '/api/stats')).body;
-  assert.equal(stats.by_store.find((s) => s.store_name === 'YACINE').orders, 2);
+  assert.equal(stats.by_store.find((s) => s.store_name === 'BOUTIQUE TEST').orders, 2);
 });
 
 test('ad plan launches in-stock products and pauses sold-out campaigns', async () => {
@@ -255,7 +255,7 @@ test('products are linked to their store from the parcels each store shipped', a
     name: 'Packers test', provider: 'ecotrack', base_url: 'https://packers-test.ecotrack.dz', api_token: 'T1',
   })).body;
   const hhd = (await api('POST', '/api/delivery/companies', { name: 'HHD test', provider: 'sandbox' })).body;
-  const azzou = (await api('POST', '/api/stores', { name: 'AZZOU', company_id: eco.id })).body;
+  const azzou = (await api('POST', '/api/stores', { name: 'BOUTIQUE LIEN', company_id: eco.id })).body;
   const other = (await api('POST', '/api/stores', { name: 'SANS API', company_id: hhd.id })).body;
   const ring = (await api('POST', '/api/products', { name: 'Bague Lune', price: 1900 })).body;
   const none = (await api('POST', '/api/products', { name: 'Jamais Vendu', price: 100 })).body;
@@ -280,17 +280,30 @@ test('products are linked to their store from the parcels each store shipped', a
     const p2 = (await api('POST', '/api/branches/scan', { store_id: azzou.id, page: 2 })).body;
     assert.equal((await api('POST', '/api/branches/scan', { store_id: other.id })).status, 400, 'sandbox has no parcel list');
     const r = (await api('POST', '/api/branches/apply', { texts: { [azzou.id]: [...p1.texts, ...p2.texts] } })).body;
-    assert.deepEqual(r.linked.map((l) => [l.product, l.to, l.orders]), [['Bague Lune', 'AZZOU', 1]]);
+    assert.deepEqual(r.linked.map((l) => [l.product, l.to, l.orders]), [['Bague Lune', 'BOUTIQUE LIEN', 1]]);
     assert.ok(r.unmatched.includes(none.name));
   } finally {
     globalThis.fetch = realFetch;
   }
   const after = (await api('GET', `/api/orders/${o.id}`)).body;
-  assert.equal(after.store_name, 'AZZOU');
+  assert.equal(after.store_name, 'BOUTIQUE LIEN');
   assert.equal(after.company_name, 'Packers test', 'open orders follow the product to its store company');
 
   // By hand from the orders table.
   const moved = (await api('PUT', `/api/products/${ring.id}/store`, { store_id: other.id })).body;
   assert.equal(moved.orders, 1);
   assert.equal((await api('GET', `/api/orders/${o.id}`)).body.company_name, 'HHD test');
+});
+
+test('the 8 stores come with their own delivery account, without tokens', async () => {
+  const stores = (await api('GET', '/api/stores')).body;
+  const companies = (await api('GET', '/api/delivery/companies')).body;
+  for (const name of ['YACINE', 'FLAMANT ROSE', 'BOUCHRA', 'YARA', 'YALIM', 'DZIRIYA', 'AZZOU', 'YAMIR']) {
+    const s = stores.find((x) => x.name === name);
+    assert.ok(s?.company_id, name);
+    const c = companies.find((x) => x.id === s.company_id);
+    assert.ok(c.name.endsWith(` - ${name}`));
+    assert.equal(c.api_token, null);
+  }
+  assert.equal(companies.find((c) => c.name === 'HHD Express - YACINE').base_url, 'https://hhdexpress.ecotrack.dz');
 });
