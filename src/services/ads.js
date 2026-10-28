@@ -13,16 +13,16 @@ const DEFAULTS = {
 
 const LIVE = ['draft', 'active'];
 
-export function getAdSettings(db) {
+export async function getAdSettings(db) {
   const out = {};
   for (const [key, def] of Object.entries(DEFAULTS)) {
-    const v = getSetting(db, `ads.${key}`);
+    const v = await getSetting(db, `ads.${key}`);
     out[key] = v == null ? def : typeof def === 'number' ? Number(v) : v;
   }
   return out;
 }
 
-export function saveAdSettings(db, body) {
+export async function saveAdSettings(db, body) {
   for (const [key, def] of Object.entries(DEFAULTS)) {
     if (body[key] === undefined) continue;
     let v = body[key];
@@ -33,21 +33,21 @@ export function saveAdSettings(db, body) {
       v = String(v ?? '').trim();
     }
     if (key === 'mode' && !['approval', 'auto'].includes(v)) throw new HttpError(400, 'mode لازم approval ولا auto');
-    setSetting(db, `ads.${key}`, v);
+    await setSetting(db, `ads.${key}`, v);
   }
   return getAdSettings(db);
 }
 
 // What the launch routine should do now: which products to launch, which campaigns to pause.
-export function getAdPlan(db) {
-  const s = getAdSettings(db);
-  const products = db.prepare(`
+export async function getAdPlan(db) {
+  const s = await getAdSettings(db);
+  const products = await db.all(`
     SELECT p.id, p.name, p.sku, p.price, p.stock, p.landing_url, p.active, p.ad_daily_budget, p.ad_creative_folder,
       s.name AS store_name, COALESCE(NULLIF(s.ad_account_id, ''), ?) AS ad_account_id,
       (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id
-        AND o.created_at >= datetime('now', '-7 days')) AS orders_7d
-    FROM products p LEFT JOIN stores s ON s.id = p.store_id`).all(s.ad_account_id || null);
-  const campaigns = db.prepare(`SELECT * FROM ad_campaigns WHERE status IN ('draft', 'active')`).all();
+        AND o.created_at >= now() - interval '7 days') AS orders_7d
+    FROM products p LEFT JOIN stores s ON s.id = p.store_id`, s.ad_account_id || null);
+  const campaigns = await db.all(`SELECT * FROM ad_campaigns WHERE status IN ('draft', 'active')`);
   const liveByProduct = new Set(campaigns.map((c) => c.product_id));
   const byId = new Map(products.map((p) => [p.id, p]));
 
@@ -84,39 +84,39 @@ export function getAdPlan(db) {
 }
 
 export function listAdCampaigns(db) {
-  return db.prepare(`
+  return db.all(`
     SELECT c.*, p.name AS product_name, p.stock FROM ad_campaigns c JOIN products p ON p.id = c.product_id
-    ORDER BY c.id DESC LIMIT 300`).all();
+    ORDER BY c.id DESC LIMIT 300`);
 }
 
 const STATUSES = ['draft', 'active', 'paused', 'stopped'];
 
-export function recordAdCampaign(db, body) {
+export async function recordAdCampaign(db, body) {
   const productId = Number(body.product_id);
-  if (!db.prepare('SELECT 1 FROM products WHERE id = ?').get(productId)) throw new HttpError(404, 'المنتج ما كانش');
+  if (!await db.get('SELECT 1 FROM products WHERE id = ?', productId || 0)) throw new HttpError(404, 'المنتج ما كانش');
   const status = body.status || 'draft';
   if (!STATUSES.includes(status)) throw new HttpError(400, 'حالة غير صحيحة');
-  const live = db.prepare(`SELECT id FROM ad_campaigns WHERE product_id = ? AND status IN (${LIVE.map(() => '?').join(',')})`)
-    .get(productId, ...LIVE);
+  const live = await db.get(`SELECT id FROM ad_campaigns WHERE product_id = ? AND status IN (${LIVE.map(() => '?').join(',')})`,
+    productId, ...LIVE);
   if (live && LIVE.includes(status)) throw new HttpError(409, 'هذا المنتج عندو حملة شاعلة');
-  const r = db.prepare(`INSERT INTO ad_campaigns (product_id, ad_account_id, meta_campaign_id, daily_budget, status, note)
-    VALUES (?, ?, ?, ?, ?, ?)`).run(
+  const r = await db.run(`INSERT INTO ad_campaigns (product_id, ad_account_id, meta_campaign_id, daily_budget, status, note)
+    VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
     productId, body.ad_account_id ? String(body.ad_account_id) : null,
     body.meta_campaign_id ? String(body.meta_campaign_id) : null,
     Number(body.daily_budget) || 0, status, body.note ? String(body.note) : null,
   );
-  return db.prepare('SELECT * FROM ad_campaigns WHERE id = ?').get(Number(r.lastInsertRowid));
+  return r.rows[0];
 }
 
-export function updateAdCampaign(db, id, body) {
-  const c = db.prepare('SELECT * FROM ad_campaigns WHERE id = ?').get(id);
+export async function updateAdCampaign(db, id, body) {
+  const c = await db.get('SELECT * FROM ad_campaigns WHERE id = ?', id || 0);
   if (!c) throw new HttpError(404, 'الحملة ما كانش');
   const status = body.status ?? c.status;
   if (!STATUSES.includes(status)) throw new HttpError(400, 'حالة غير صحيحة');
-  db.prepare(`UPDATE ad_campaigns SET status = ?, meta_campaign_id = ?, daily_budget = ?, note = ?,
-    updated_at = datetime('now') WHERE id = ?`).run(
+  const r = await db.run(`UPDATE ad_campaigns SET status = ?, meta_campaign_id = ?, daily_budget = ?, note = ?,
+    updated_at = now() WHERE id = ? RETURNING *`,
     status, body.meta_campaign_id ?? c.meta_campaign_id,
     body.daily_budget != null ? Number(body.daily_budget) : c.daily_budget, body.note ?? c.note, id,
   );
-  return db.prepare('SELECT * FROM ad_campaigns WHERE id = ?').get(id);
+  return r.rows[0];
 }

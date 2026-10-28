@@ -1,45 +1,41 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { WILAYAS } from '../wilayas.js';
-import { createOrder, resolveRoute } from '../services/orders.js';
+import { createOrder, HttpError } from '../services/orders.js';
+import { readBody } from './api.js';
 
 // Endpoints called from the product landing pages (any domain), so CORS is open.
 export function publicRouter(db) {
-  const r = Router();
+  const r = new Hono();
   const hits = new Map();
 
-  r.use((req, res, next) => {
-    res.set('Access-Control-Allow-Origin', '*');
-    res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type');
-    if (req.method === 'OPTIONS') return res.sendStatus(204);
-    next();
-  });
+  r.use('*', cors({ origin: '*', allowMethods: ['GET', 'POST', 'OPTIONS'], allowHeaders: ['Content-Type'] }));
 
-  // Basic flood protection: 20 orders per IP per 10 minutes.
-  const limit = (req, res, next) => {
+  // Basic flood protection: 20 orders per IP per 10 minutes. Best effort: each
+  // serverless instance keeps its own counter.
+  const limit = async (c, next) => {
+    const ip = c.env?.ip || c.req.header('x-nf-client-connection-ip') || c.req.header('x-forwarded-for') || 'unknown';
     const now = Date.now();
-    const list = (hits.get(req.ip) || []).filter((t) => now - t < 600_000);
-    if (list.length >= 20) return res.status(429).json({ error: 'طلبات كثيرة، حاول لاحقاً' });
+    const list = (hits.get(ip) || []).filter((t) => now - t < 600_000);
+    if (list.length >= 20) return c.json({ error: 'طلبات كثيرة، حاول لاحقاً' }, 429);
     list.push(now);
-    hits.set(req.ip, list);
-    next();
+    hits.set(ip, list);
+    return next();
   };
 
-  r.get('/products/:key', (req, res) => {
-    const p = db.prepare('SELECT name, price, active FROM products WHERE public_key = ?').get(req.params.key);
-    if (!p || !p.active) return res.status(404).json({ error: 'المنتج غير موجود' });
-    const wilayas = WILAYAS.map((w) => {
-      const route = resolveRoute(db, w.code);
-      return { ...w, home_fee: route.home_fee, desk_fee: route.desk_fee };
-    });
-    res.json({ name: p.name, price: p.price, wilayas });
+  r.get('/products/:key', async (c) => {
+    const p = await db.get('SELECT name, price, active FROM products WHERE public_key = ?', c.req.param('key'));
+    if (!p || !p.active) throw new HttpError(404, 'المنتج غير موجود');
+    const fees = Object.fromEntries((await db.all('SELECT * FROM delivery_routes')).map((x) => [x.wilaya_code, x]));
+    const wilayas = WILAYAS.map((w) => ({ ...w, home_fee: fees[w.code]?.home_fee ?? 0, desk_fee: fees[w.code]?.desk_fee ?? 0 }));
+    return c.json({ name: p.name, price: p.price, wilayas });
   });
 
-  r.post('/orders', limit, (req, res) => {
-    const b = req.body || {};
+  r.post('/orders', limit, async (c) => {
+    const b = await readBody(c);
     // Honeypot field: real visitors never fill it.
-    if (b.website) return res.status(201).json({ ok: true });
-    const order = createOrder(db, {
+    if (b.website) return c.json({ ok: true }, 201);
+    const order = await createOrder(db, {
       key: b.key,
       customer_name: b.name ?? b.customer_name,
       phone: b.phone,
@@ -50,11 +46,11 @@ export function publicRouter(db) {
       quantity: b.quantity,
       stop_desk: b.stop_desk === true || b.stop_desk === '1' || b.stop_desk === 1,
       notes: b.notes,
-      landing_url: b.landing_url || req.get('referer') || null,
+      landing_url: b.landing_url || c.req.header('referer') || null,
       utm_source: b.utm_source,
       utm_campaign: b.utm_campaign,
     }, { source: 'landing' });
-    res.status(201).json({ ok: true, reference: order.reference, total: order.total });
+    return c.json({ ok: true, reference: order.reference, total: order.total }, 201);
   });
 
   return r;

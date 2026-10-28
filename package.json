@@ -2,16 +2,22 @@
   "name": "erp-cod",
   "version": "0.1.0",
   "private": true,
-  "description": "ERP for Algerian COD e-commerce: products, landing-page orders, confirmation, auto-dispatch to delivery companies by wilaya, stock and stats.",
+  "description": "ERP for Algerian COD e-commerce: products, landing-page orders, confirmation, auto-dispatch to each store's delivery company, stock, ads and stats. Runs on Netlify (Functions + Netlify Database).",
   "type": "module",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=20.12"
+  },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/server.js",
-    "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js",
-    "seed": "node --disable-warning=ExperimentalWarning src/seed.js",
-    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "@electric-sql/pglite": "^0.5.13",
+    "@hono/node-server": "^2.1.5",
+    "@netlify/database": "^2.0.1",
+    "hono": "^4.13.14",
+    "pg": "^8.23.1"
   }
 }

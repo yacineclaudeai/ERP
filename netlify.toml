@@ -1,0 +1,6 @@
+[build]
+  publish = "public"
+  command = "npm test"
+
+[functions]
+  node_bundler = "esbuild"

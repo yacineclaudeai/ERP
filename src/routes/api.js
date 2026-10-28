@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { Router } from 'express';
-import { getSetting, setSetting, tx } from '../db.js';
+import { Hono } from 'hono';
+import { getSetting, setSetting } from '../db.js';
 import { hashPassword, verifyPassword, setSession, clearSession, authMiddleware, requireAdmin } from '../auth.js';
 import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
@@ -8,44 +8,57 @@ import {
   STATUSES, HttpError, getOrder, createOrder, updateOrder, applyAction,
   confirmAndDispatch, dispatchOrder, syncTracking,
 } from '../services/orders.js';
-import { getStats } from '../services/stats.js';
+import { getStats, localDay } from '../services/stats.js';
 import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
+const idParam = (c) => Math.max(0, Math.floor(Number(c.req.param('id')))) || 0;
+
+// JSON from the admin UI, or a classic form post.
+export async function readBody(c) {
+  const type = c.req.header('content-type') || '';
+  if (type.includes('application/json')) return (await c.req.json().catch(() => ({}))) || {};
+  if (type.includes('form')) return c.req.parseBody();
+  return {};
+}
 
 export function apiRouter(db) {
-  const r = Router();
+  const r = new Hono();
+  r.use('*', async (c, next) => {
+    if (['POST', 'PUT', 'PATCH'].includes(c.req.method)) c.set('body', await readBody(c));
+    return next();
+  });
+  const body = (c) => c.get('body') || {};
 
   // ---- auth ----
-  r.post('/auth/login', (req, res) => {
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(String(req.body.username || ''));
-    if (!user || !verifyPassword(String(req.body.password || ''), user.password_hash)) {
-      return res.status(401).json({ error: 'اسم المستخدم أو كلمة السر غير صحيحة' });
+  r.post('/auth/login', async (c) => {
+    const b = body(c);
+    const user = await db.get('SELECT * FROM users WHERE username = ?', String(b.username || ''));
+    if (!user || !verifyPassword(String(b.password || ''), user.password_hash)) {
+      return c.json({ error: 'اسم المستخدم أو كلمة السر غير صحيحة' }, 401);
     }
-    setSession(res, user);
-    res.json({ id: user.id, username: user.username, role: user.role });
+    setSession(c, user);
+    return c.json({ id: user.id, username: user.username, role: user.role });
   });
-  r.post('/auth/logout', (req, res) => {
-    clearSession(res);
-    res.json({ ok: true });
+  r.post('/auth/logout', (c) => {
+    clearSession(c);
+    return c.json({ ok: true });
   });
 
-  r.use(authMiddleware(db));
-  r.get('/auth/me', (req, res) => res.json(req.user));
+  r.use('*', authMiddleware(db));
+  r.get('/auth/me', (c) => c.json(c.get('user')));
 
-  r.get('/meta', (req, res) => res.json({ wilayas: WILAYAS, statuses: STATUSES, providers: PROVIDER_NAMES }));
+  r.get('/meta', (c) => c.json({ wilayas: WILAYAS, statuses: STATUSES, providers: PROVIDER_NAMES }));
 
   // ---- products ----
-  r.get('/products', (req, res) => {
-    res.json(db.prepare(`
-      SELECT p.*, s.name AS store_name,
-        (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id) AS orders_count,
-        (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id AND o.status IN ('new','no_answer','postponed')) AS pending_count
-      FROM products p LEFT JOIN stores s ON s.id = p.store_id
-      ORDER BY p.active DESC, p.id DESC`).all());
-  });
+  r.get('/products', async (c) => c.json(await db.all(`
+    SELECT p.*, s.name AS store_name,
+      (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id) AS orders_count,
+      (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id AND o.status IN ('new','no_answer','postponed')) AS pending_count
+    FROM products p LEFT JOIN stores s ON s.id = p.store_id
+    ORDER BY p.active DESC, p.id DESC`)));
 
   const productFields = (b) => ({
     name: String(b.name || '').trim(),
@@ -54,141 +67,137 @@ export function apiRouter(db) {
     cost: Number(b.cost) || 0,
     landing_url: b.landing_url ? String(b.landing_url).trim() : null,
     store_id: b.store_id ? Number(b.store_id) : null,
-    active: b.active === false || b.active === 0 ? 0 : 1,
+    active: !(b.active === false || b.active === 0 || b.active === '0'),
     ad_daily_budget: Number(b.ad_daily_budget) > 0 ? Number(b.ad_daily_budget) : null,
     ad_creative_folder: b.ad_creative_folder ? String(b.ad_creative_folder).trim() : null,
   });
 
-  r.post('/products', requireAdmin, (req, res) => {
-    const f = productFields(req.body);
+  r.post('/products', requireAdmin, async (c) => {
+    const f = productFields(body(c));
     if (!f.name) throw new HttpError(400, 'اسم المنتج ضروري');
-    const stock = Math.floor(Number(req.body.stock) || 0);
-    const id = tx(db, () => {
-      const { lastInsertRowid } = db.prepare(`
+    const stock = Math.floor(Number(body(c).stock) || 0);
+    const product = await db.tx(async (t) => {
+      const { rows: [p] } = await t.run(`
         INSERT INTO products (name, sku, price, cost, stock, landing_url, store_id, active, ad_daily_budget, ad_creative_folder, public_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.store_id, f.active, f.ad_daily_budget, f.ad_creative_folder, newKey());
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.store_id, f.active, f.ad_daily_budget, f.ad_creative_folder, newKey());
       if (stock) {
-        db.prepare(`INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, 'مخزون أولي')`)
-          .run(lastInsertRowid, stock);
+        await t.run(`INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, 'مخزون أولي')`, p.id, stock);
       }
-      return lastInsertRowid;
+      return p;
     });
-    res.status(201).json(db.prepare('SELECT * FROM products WHERE id = ?').get(id));
+    return c.json(product, 201);
   });
 
-  r.put('/products/:id', requireAdmin, (req, res) => {
-    const f = productFields(req.body);
+  r.put('/products/:id', requireAdmin, async (c) => {
+    const id = idParam(c);
+    const b = body(c);
+    const f = productFields(b);
     if (!f.name) throw new HttpError(400, 'اسم المنتج ضروري');
-    const { changes } = db.prepare(`
-      UPDATE products SET name = ?, sku = ?, price = ?, cost = ?, landing_url = ?, store_id = ?, active = ? WHERE id = ?`)
-      .run(f.name, f.sku, f.price, f.cost, f.landing_url, f.store_id, f.active, req.params.id);
+    const { changes } = await db.run(`
+      UPDATE products SET name = ?, sku = ?, price = ?, cost = ?, landing_url = ?, store_id = ?, active = ? WHERE id = ?`,
+      f.name, f.sku, f.price, f.cost, f.landing_url, f.store_id, f.active, id);
     if (!changes) throw new HttpError(404, 'المنتج غير موجود');
     // Only touch the ad fields the caller sends, so older forms do not wipe them.
     for (const key of ['ad_daily_budget', 'ad_creative_folder']) {
-      if (req.body[key] !== undefined) db.prepare(`UPDATE products SET ${key} = ? WHERE id = ?`).run(f[key], req.params.id);
+      if (b[key] !== undefined) await db.run(`UPDATE products SET ${key} = ? WHERE id = ?`, f[key], id);
     }
-    res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
+    return c.json(await db.get('SELECT * FROM products WHERE id = ?', id));
   });
 
-  r.post('/products/:id/regenerate-key', requireAdmin, (req, res) => {
-    db.prepare('UPDATE products SET public_key = ? WHERE id = ?').run(newKey(), req.params.id);
-    res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
+  r.post('/products/:id/regenerate-key', requireAdmin, async (c) => {
+    const { rows: [p] } = await db.run('UPDATE products SET public_key = ? WHERE id = ? RETURNING *', newKey(), idParam(c));
+    if (!p) throw new HttpError(404, 'المنتج غير موجود');
+    return c.json(p);
   });
 
   // Stock in (new purchase) or correction. quantity may be negative.
-  r.post('/products/:id/stock', requireAdmin, (req, res) => {
-    const qty = Math.floor(Number(req.body.quantity));
+  r.post('/products/:id/stock', requireAdmin, async (c) => {
+    const id = idParam(c);
+    const qty = Math.floor(Number(body(c).quantity));
     if (!qty) throw new HttpError(400, 'الكمية ضرورية');
-    const reason = String(req.body.reason || (qty > 0 ? 'دخول سلعة' : 'تصحيح'));
-    tx(db, () => {
-      const { changes } = db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(qty, req.params.id);
-      if (!changes) throw new HttpError(404, 'المنتج غير موجود');
-      db.prepare('INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, ?)').run(req.params.id, qty, reason);
+    const reason = String(body(c).reason || (qty > 0 ? 'دخول سلعة' : 'تصحيح'));
+    const product = await db.tx(async (t) => {
+      const { rows: [p] } = await t.run('UPDATE products SET stock = stock + ? WHERE id = ? RETURNING *', qty, id);
+      if (!p) throw new HttpError(404, 'المنتج غير موجود');
+      await t.run('INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, ?)', id, qty, reason);
+      return p;
     });
-    res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
+    return c.json(product);
   });
 
-  r.get('/products/:id/stock-movements', (req, res) => {
-    res.json(db.prepare(`
-      SELECT m.*, o.reference FROM stock_movements m LEFT JOIN orders o ON o.id = m.order_id
-      WHERE m.product_id = ? ORDER BY m.id DESC LIMIT 200`).all(req.params.id));
-  });
+  r.get('/products/:id/stock-movements', async (c) => c.json(await db.all(`
+    SELECT m.*, o.reference FROM stock_movements m LEFT JOIN orders o ON o.id = m.order_id
+    WHERE m.product_id = ? ORDER BY m.id DESC LIMIT 200`, idParam(c))));
 
   // ---- orders ----
-  r.get('/orders', (req, res) => {
+  r.get('/orders', async (c) => {
+    const q = c.req.query();
     const where = [];
     const args = [];
-    if (req.query.status) {
-      const list = String(req.query.status).split(',').filter((s) => STATUSES.includes(s));
+    if (q.status) {
+      const list = String(q.status).split(',').filter((s) => STATUSES.includes(s));
       if (list.length) where.push(`o.status IN (${list.map(() => '?').join(',')})`), args.push(...list);
     }
-    if (req.query.product_id) where.push('o.product_id = ?'), args.push(Number(req.query.product_id));
-    if (req.query.store_id) where.push('p.store_id = ?'), args.push(Number(req.query.store_id));
-    if (req.query.wilaya) where.push('o.wilaya_code = ?'), args.push(Number(req.query.wilaya));
-    if (req.query.company_id) where.push('o.company_id = ?'), args.push(Number(req.query.company_id));
-    if (req.query.from) where.push('date(o.created_at) >= date(?)'), args.push(req.query.from);
-    if (req.query.to) where.push('date(o.created_at) <= date(?)'), args.push(req.query.to);
-    if (req.query.dispatch_error === '1') where.push('o.dispatch_error IS NOT NULL');
-    if (req.query.q) {
-      const q = `%${String(req.query.q).trim()}%`;
-      where.push('(o.customer_name LIKE ? OR o.phone LIKE ? OR o.reference LIKE ? OR o.tracking LIKE ?)');
-      args.push(q, q, q, q);
+    if (Number(q.product_id)) where.push('o.product_id = ?'), args.push(Number(q.product_id));
+    if (Number(q.store_id)) where.push('p.store_id = ?'), args.push(Number(q.store_id));
+    if (Number(q.wilaya)) where.push('o.wilaya_code = ?'), args.push(Number(q.wilaya));
+    if (Number(q.company_id)) where.push('o.company_id = ?'), args.push(Number(q.company_id));
+    const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+    if (isDate(q.from)) where.push(`${localDay('o.created_at')} >= ?::date`), args.push(q.from);
+    if (isDate(q.to)) where.push(`${localDay('o.created_at')} <= ?::date`), args.push(q.to);
+    if (q.dispatch_error === '1') where.push('o.dispatch_error IS NOT NULL');
+    if (q.q) {
+      const like = `%${String(q.q).trim()}%`;
+      where.push('(o.customer_name ILIKE ? OR o.phone LIKE ? OR o.reference ILIKE ? OR o.tracking ILIKE ?)');
+      args.push(like, like, like, like);
     }
-    const limit = Math.min(500, Number(req.query.limit) || 100);
-    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const limit = Math.min(500, Number(q.limit) || 100);
+    const offset = Math.max(0, Number(q.offset) || 0);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const rows = db.prepare(`
+    const rows = await db.all(`
       SELECT o.*, p.name AS product_name, s.name AS store_name, c.name AS company_name
       FROM orders o JOIN products p ON p.id = o.product_id
       LEFT JOIN stores s ON s.id = p.store_id
       LEFT JOIN delivery_companies c ON c.id = o.company_id
-      ${whereSql} ORDER BY o.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
-    const { total } = db.prepare(`SELECT COUNT(*) AS total FROM orders o JOIN products p ON p.id = o.product_id ${whereSql}`).get(...args);
-    res.json({ rows, total });
+      ${whereSql} ORDER BY o.id DESC LIMIT ? OFFSET ?`, ...args, limit, offset);
+    const { total } = await db.get(`SELECT COUNT(*) AS total FROM orders o JOIN products p ON p.id = o.product_id ${whereSql}`, ...args);
+    return c.json({ rows, total });
   });
 
-  r.get('/orders/:id', (req, res) => {
-    const order = getOrder(db, Number(req.params.id));
-    const events = db.prepare(`
+  r.get('/orders/:id', async (c) => {
+    const order = await getOrder(db, idParam(c));
+    const events = await db.all(`
       SELECT e.*, u.username FROM order_events e LEFT JOIN users u ON u.id = e.user_id
-      WHERE e.order_id = ? ORDER BY e.id DESC`).all(order.id);
-    res.json({ ...order, events });
+      WHERE e.order_id = ? ORDER BY e.id DESC`, order.id);
+    return c.json({ ...order, events });
   });
 
-  r.post('/orders', (req, res) => {
-    res.status(201).json(createOrder(db, req.body, { source: 'manual', userId: req.user.id }));
-  });
+  r.post('/orders', async (c) => c.json(await createOrder(db, body(c), { source: 'manual', userId: c.get('user').id }), 201));
 
-  r.put('/orders/:id', (req, res) => {
-    res.json(updateOrder(db, Number(req.params.id), req.body, req.user.id));
-  });
+  r.put('/orders/:id', async (c) => c.json(await updateOrder(db, idParam(c), body(c), c.get('user').id)));
 
-  r.post('/orders/:id/action', async (req, res) => {
-    const id = Number(req.params.id);
-    const opts = { userId: req.user.id, note: req.body.note || null };
-    const order = req.body.action === 'confirm'
+  r.post('/orders/:id/action', async (c) => {
+    const id = idParam(c);
+    const b = body(c);
+    const opts = { userId: c.get('user').id, note: b.note || null };
+    return c.json(b.action === 'confirm'
       ? await confirmAndDispatch(db, id, opts)
-      : applyAction(db, id, String(req.body.action), opts);
-    res.json(order);
+      : await applyAction(db, id, String(b.action), opts));
   });
 
   // Retry a failed dispatch, or record a tracking number by hand.
-  r.post('/orders/:id/dispatch', async (req, res) => {
-    res.json(await dispatchOrder(db, Number(req.params.id), {
-      userId: req.user.id,
-      tracking: req.body.tracking ? String(req.body.tracking).trim() : null,
-    }));
-  });
+  r.post('/orders/:id/dispatch', async (c) => c.json(await dispatchOrder(db, idParam(c), {
+    userId: c.get('user').id,
+    tracking: body(c).tracking ? String(body(c).tracking).trim() : null,
+  })));
 
-  r.post('/orders/sync-tracking', async (req, res) => {
-    res.json(await syncTracking(db));
-  });
+  r.post('/orders/sync-tracking', async (c) => c.json(await syncTracking(db)));
 
   // ---- delivery companies & routing ----
-  r.get('/delivery/companies', (req, res) => {
-    const rows = db.prepare('SELECT * FROM delivery_companies ORDER BY id').all();
-    res.json(rows.map((c) => ({ ...c, api_token: c.api_token ? '••••' + c.api_token.slice(-4) : null })));
+  r.get('/delivery/companies', async (c) => {
+    const rows = await db.all('SELECT * FROM delivery_companies ORDER BY id');
+    return c.json(rows.map((x) => ({ ...x, api_token: x.api_token ? '••••' + x.api_token.slice(-4) : null })));
   });
 
   const companyFields = (b) => {
@@ -196,34 +205,34 @@ export function apiRouter(db) {
     if (!PROVIDER_NAMES.includes(provider)) throw new HttpError(400, 'نوع غير معروف');
     const name = String(b.name || '').trim();
     if (!name) throw new HttpError(400, 'الاسم ضروري');
-    return { name, provider, base_url: b.base_url ? String(b.base_url).trim() : null, active: b.active === false ? 0 : 1 };
+    return { name, provider, base_url: b.base_url ? String(b.base_url).trim() : null, active: b.active !== false };
   };
 
-  r.post('/delivery/companies', requireAdmin, (req, res) => {
-    const f = companyFields(req.body);
-    const { lastInsertRowid } = db.prepare(`
-      INSERT INTO delivery_companies (name, provider, base_url, api_token, active) VALUES (?, ?, ?, ?, ?)`)
-      .run(f.name, f.provider, f.base_url, req.body.api_token || null, f.active);
-    if (!getSetting(db, 'default_company_id')) setSetting(db, 'default_company_id', lastInsertRowid);
-    res.status(201).json({ id: Number(lastInsertRowid) });
+  r.post('/delivery/companies', requireAdmin, async (c) => {
+    const f = companyFields(body(c));
+    const { rows: [{ id }] } = await db.run(`
+      INSERT INTO delivery_companies (name, provider, base_url, api_token, active) VALUES (?, ?, ?, ?, ?) RETURNING id`,
+      f.name, f.provider, f.base_url, body(c).api_token || null, f.active);
+    if (!await getSetting(db, 'default_company_id')) await setSetting(db, 'default_company_id', id);
+    return c.json({ id }, 201);
   });
 
-  r.put('/delivery/companies/:id', requireAdmin, (req, res) => {
-    const f = companyFields(req.body);
+  r.put('/delivery/companies/:id', requireAdmin, async (c) => {
+    const f = companyFields(body(c));
     // An empty token field means "keep the current one".
-    const token = req.body.api_token ? String(req.body.api_token) : undefined;
-    db.prepare(`UPDATE delivery_companies SET name = ?, provider = ?, base_url = ?, active = ?
-      ${token !== undefined ? ', api_token = ?' : ''} WHERE id = ?`)
-      .run(...[f.name, f.provider, f.base_url, f.active, ...(token !== undefined ? [token] : []), req.params.id]);
-    res.json({ ok: true });
+    const token = body(c).api_token ? String(body(c).api_token) : undefined;
+    await db.run(`UPDATE delivery_companies SET name = ?, provider = ?, base_url = ?, active = ?
+      ${token !== undefined ? ', api_token = ?' : ''} WHERE id = ?`,
+      f.name, f.provider, f.base_url, f.active, ...(token !== undefined ? [token] : []), idParam(c));
+    return c.json({ ok: true });
   });
 
-  r.get('/delivery/routes', (req, res) => {
-    const routes = db.prepare('SELECT * FROM delivery_routes').all();
+  r.get('/delivery/routes', async (c) => {
+    const routes = await db.all('SELECT * FROM delivery_routes');
     const byCode = Object.fromEntries(routes.map((x) => [x.wilaya_code, x]));
-    res.json({
-      default_company_id: Number(getSetting(db, 'default_company_id')) || null,
-      auto_dispatch: getSetting(db, 'auto_dispatch') !== '0',
+    return c.json({
+      default_company_id: Number(await getSetting(db, 'default_company_id')) || null,
+      auto_dispatch: await getSetting(db, 'auto_dispatch') !== '0',
       routes: WILAYAS.map((w) => ({
         ...w,
         company_id: byCode[w.code]?.company_id ?? null,
@@ -233,136 +242,134 @@ export function apiRouter(db) {
     });
   });
 
-  r.put('/delivery/routes', requireAdmin, (req, res) => {
-    const { routes = [], default_company_id, auto_dispatch } = req.body;
-    tx(db, () => {
-      const upsert = db.prepare(`
-        INSERT INTO delivery_routes (wilaya_code, company_id, home_fee, desk_fee) VALUES (?, ?, ?, ?)
-        ON CONFLICT(wilaya_code) DO UPDATE SET company_id = excluded.company_id,
-          home_fee = excluded.home_fee, desk_fee = excluded.desk_fee`);
+  r.put('/delivery/routes', requireAdmin, async (c) => {
+    const { routes = [], default_company_id, auto_dispatch } = body(c);
+    await db.tx(async (t) => {
       for (const x of routes) {
         const code = Number(x.wilaya_code ?? x.code);
         if (!isValidWilaya(code)) continue;
-        upsert.run(code, x.company_id ? Number(x.company_id) : null, Number(x.home_fee) || 0, Number(x.desk_fee) || 0);
+        await t.run(`
+          INSERT INTO delivery_routes (wilaya_code, company_id, home_fee, desk_fee) VALUES (?, ?, ?, ?)
+          ON CONFLICT (wilaya_code) DO UPDATE SET company_id = excluded.company_id,
+            home_fee = excluded.home_fee, desk_fee = excluded.desk_fee`,
+          code, x.company_id ? Number(x.company_id) : null, Number(x.home_fee) || 0, Number(x.desk_fee) || 0);
       }
-      if (default_company_id !== undefined) setSetting(db, 'default_company_id', default_company_id || null);
-      if (auto_dispatch !== undefined) setSetting(db, 'auto_dispatch', auto_dispatch ? '1' : '0');
+      if (default_company_id !== undefined) await setSetting(t, 'default_company_id', default_company_id || null);
+      if (auto_dispatch !== undefined) await setSetting(t, 'auto_dispatch', auto_dispatch ? '1' : '0');
     });
-    res.json({ ok: true });
+    return c.json({ ok: true });
   });
 
   // ---- stores (boutiques) ----
-  r.get('/stores', (req, res) => {
-    const stores = db.prepare(`
+  r.get('/stores', async (c) => {
+    const stores = await db.all(`
       SELECT s.*, c.name AS company_name,
         (SELECT COUNT(*) FROM products p WHERE p.store_id = s.id) AS products_count
-      FROM stores s LEFT JOIN delivery_companies c ON c.id = s.company_id ORDER BY s.name`).all();
-    const routes = db.prepare(`
+      FROM stores s LEFT JOIN delivery_companies c ON c.id = s.company_id ORDER BY s.name`);
+    const routes = await db.all(`
       SELECT r.*, c.name AS company_name FROM store_routes r JOIN delivery_companies c ON c.id = r.company_id
-      ORDER BY r.wilaya_code`).all();
-    res.json(stores.map((s) => ({ ...s, routes: routes.filter((r) => r.store_id === s.id) })));
+      ORDER BY r.wilaya_code`);
+    return c.json(stores.map((s) => ({ ...s, routes: routes.filter((x) => x.store_id === s.id) })));
   });
 
   const saveStore = (id, b) => {
     const name = String(b.name || '').trim();
     if (!name) throw new HttpError(400, 'اسم البوتيك ضروري');
     const companyId = b.company_id ? Number(b.company_id) : null;
-    return tx(db, () => {
-      try {
-        if (id) db.prepare('UPDATE stores SET name = ?, company_id = ? WHERE id = ?').run(name, companyId, id);
-        else id = Number(db.prepare('INSERT INTO stores (name, company_id) VALUES (?, ?)').run(name, companyId).lastInsertRowid);
-      } catch {
-        throw new HttpError(409, 'هاد الاسم مستعمل');
+    return db.tx(async (t) => {
+      if (id) {
+        const { changes } = await t.run('UPDATE stores SET name = ?, company_id = ? WHERE id = ?', name, companyId, id);
+        if (!changes) throw new HttpError(404, 'البوتيك ما كانش');
+      } else {
+        id = (await t.run('INSERT INTO stores (name, company_id) VALUES (?, ?) RETURNING id', name, companyId)).rows[0].id;
       }
       if (b.ad_account_id !== undefined) {
         const account = String(b.ad_account_id || '').replace(/^act_/, '').trim() || null;
-        db.prepare('UPDATE stores SET ad_account_id = ? WHERE id = ?').run(account, id);
+        await t.run('UPDATE stores SET ad_account_id = ? WHERE id = ?', account, id);
       }
       if (Array.isArray(b.routes)) {
-        db.prepare('DELETE FROM store_routes WHERE store_id = ?').run(id);
-        const insert = db.prepare('INSERT OR REPLACE INTO store_routes (store_id, wilaya_code, company_id) VALUES (?, ?, ?)');
+        await t.run('DELETE FROM store_routes WHERE store_id = ?', id);
         for (const x of b.routes) {
           const code = Number(x.wilaya_code);
-          if (isValidWilaya(code) && x.company_id) insert.run(id, code, Number(x.company_id));
+          if (!isValidWilaya(code) || !x.company_id) continue;
+          await t.run(`INSERT INTO store_routes (store_id, wilaya_code, company_id) VALUES (?, ?, ?)
+            ON CONFLICT (store_id, wilaya_code) DO UPDATE SET company_id = excluded.company_id`, id, code, Number(x.company_id));
         }
       }
       return id;
     });
   };
 
-  r.post('/stores', requireAdmin, (req, res) => res.status(201).json({ id: saveStore(null, req.body) }));
-  r.put('/stores/:id', requireAdmin, (req, res) => res.json({ id: saveStore(Number(req.params.id), req.body) }));
-  r.delete('/stores/:id', requireAdmin, (req, res) => {
-    db.prepare('DELETE FROM stores WHERE id = ?').run(req.params.id);
-    res.json({ ok: true });
+  r.post('/stores', requireAdmin, async (c) => c.json({ id: await saveStore(null, body(c)) }, 201));
+  r.put('/stores/:id', requireAdmin, async (c) => c.json({ id: await saveStore(idParam(c), body(c)) }));
+  r.delete('/stores/:id', requireAdmin, async (c) => {
+    await db.run('DELETE FROM stores WHERE id = ?', idParam(c));
+    return c.json({ ok: true });
   });
 
   // ---- ad spend (Meta Ads etc.) ----
-  r.get('/ad-spend', (req, res) => {
-    res.json(db.prepare(`
-      SELECT a.*, p.name AS product_name FROM ad_spend a JOIN products p ON p.id = a.product_id
-      ORDER BY a.date DESC, a.id DESC LIMIT 300`).all());
-  });
+  r.get('/ad-spend', async (c) => c.json(await db.all(`
+    SELECT a.*, p.name AS product_name FROM ad_spend a JOIN products p ON p.id = a.product_id
+    ORDER BY a.date DESC, a.id DESC LIMIT 300`)));
 
-  r.post('/ad-spend', requireAdmin, (req, res) => {
-    const date = String(req.body.date || '').slice(0, 10);
-    const amount = Number(req.body.amount);
+  r.post('/ad-spend', requireAdmin, async (c) => {
+    const b = body(c);
+    const date = String(b.date || '').slice(0, 10);
+    const amount = Number(b.amount);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !(amount >= 0)) throw new HttpError(400, 'التاريخ أو المبلغ غير صحيح');
-    db.prepare(`INSERT INTO ad_spend (product_id, date, amount) VALUES (?, ?, ?)
-      ON CONFLICT(product_id, date) DO UPDATE SET amount = excluded.amount`)
-      .run(Number(req.body.product_id), date, amount);
-    res.json({ ok: true });
+    await db.run(`INSERT INTO ad_spend (product_id, date, amount) VALUES (?, ?, ?)
+      ON CONFLICT (product_id, date) DO UPDATE SET amount = excluded.amount`,
+      Number(b.product_id) || 0, date, amount);
+    return c.json({ ok: true });
   });
 
-  r.delete('/ad-spend/:id', requireAdmin, (req, res) => {
-    db.prepare('DELETE FROM ad_spend WHERE id = ?').run(req.params.id);
-    res.json({ ok: true });
+  r.delete('/ad-spend/:id', requireAdmin, async (c) => {
+    await db.run('DELETE FROM ad_spend WHERE id = ?', idParam(c));
+    return c.json({ ok: true });
   });
 
   // ---- ad campaigns (read and written by the launch routine with AUTOMATION_TOKEN) ----
-  r.get('/ads/settings', (req, res) => res.json(getAdSettings(db)));
-  r.put('/ads/settings', requireAdmin, (req, res) => res.json(saveAdSettings(db, req.body)));
-  r.get('/ads/plan', (req, res) => res.json(getAdPlan(db)));
-  r.get('/ads/campaigns', (req, res) => res.json(listAdCampaigns(db)));
-  r.post('/ads/campaigns', requireAdmin, (req, res) => res.status(201).json(recordAdCampaign(db, req.body)));
-  r.patch('/ads/campaigns/:id', requireAdmin, (req, res) => res.json(updateAdCampaign(db, Number(req.params.id), req.body)));
+  r.get('/ads/settings', async (c) => c.json(await getAdSettings(db)));
+  r.put('/ads/settings', requireAdmin, async (c) => c.json(await saveAdSettings(db, body(c))));
+  r.get('/ads/plan', async (c) => c.json(await getAdPlan(db)));
+  r.get('/ads/campaigns', async (c) => c.json(await listAdCampaigns(db)));
+  r.post('/ads/campaigns', requireAdmin, async (c) => c.json(await recordAdCampaign(db, body(c)), 201));
+  r.patch('/ads/campaigns/:id', requireAdmin, async (c) => c.json(await updateAdCampaign(db, idParam(c), body(c))));
 
   // ---- stats ----
-  r.get('/stats', (req, res) => {
-    res.json(getStats(db, { from: req.query.from || null, to: req.query.to || null }));
+  r.get('/stats', async (c) => {
+    const { from, to } = c.req.query();
+    const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+    return c.json(await getStats(db, { from: isDate(from) ? from : null, to: isDate(to) ? to : null }));
   });
 
   // ---- users ----
-  r.get('/users', requireAdmin, (req, res) => {
-    res.json(db.prepare('SELECT id, username, role, created_at FROM users ORDER BY id').all());
-  });
+  r.get('/users', requireAdmin, async (c) => c.json(await db.all('SELECT id, username, role, created_at FROM users ORDER BY id')));
 
-  r.post('/users', requireAdmin, (req, res) => {
-    const username = String(req.body.username || '').trim();
-    const password = String(req.body.password || '');
-    const role = req.body.role === 'admin' ? 'admin' : 'agent';
+  r.post('/users', requireAdmin, async (c) => {
+    const b = body(c);
+    const username = String(b.username || '').trim();
+    const password = String(b.password || '');
+    const role = b.role === 'admin' ? 'admin' : 'agent';
     if (!username || password.length < 6) throw new HttpError(400, 'الاسم ضروري وكلمة السر 6 حروف على الأقل');
-    try {
-      db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)').run(username, hashPassword(password), role);
-    } catch {
-      throw new HttpError(409, 'هذا الاسم مستعمل');
-    }
-    res.status(201).json({ ok: true });
+    await db.run('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)', username, hashPassword(password), role);
+    return c.json({ ok: true }, 201);
   });
 
-  r.put('/users/:id/password', (req, res) => {
-    const id = Number(req.params.id);
-    if (req.user.role !== 'admin' && req.user.id !== id) throw new HttpError(403, 'ممنوع');
-    const password = String(req.body.password || '');
+  r.put('/users/:id/password', async (c) => {
+    const id = idParam(c);
+    const user = c.get('user');
+    if (user.role !== 'admin' && user.id !== id) throw new HttpError(403, 'ممنوع');
+    const password = String(body(c).password || '');
     if (password.length < 6) throw new HttpError(400, 'كلمة السر 6 حروف على الأقل');
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), id);
-    res.json({ ok: true });
+    await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), id);
+    return c.json({ ok: true });
   });
 
-  r.delete('/users/:id', requireAdmin, (req, res) => {
-    if (Number(req.params.id) === req.user.id) throw new HttpError(400, 'ما تقدرش تمسح روحك');
-    db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
-    res.json({ ok: true });
+  r.delete('/users/:id', requireAdmin, async (c) => {
+    if (idParam(c) === c.get('user').id) throw new HttpError(400, 'ما تقدرش تمسح روحك');
+    await db.run('DELETE FROM users WHERE id = ?', idParam(c));
+    return c.json({ ok: true });
   });
 
   return r;

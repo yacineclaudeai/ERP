@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 
 const SESSION_DAYS = 30;
 const COOKIE = 'erp_session';
@@ -31,51 +32,53 @@ function unsign(token) {
   if (!body || !mac) return null;
   const expected = crypto.createHmac('sha256', secret()).update(body).digest('base64url');
   if (mac.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))) return null;
-  const payload = JSON.parse(Buffer.from(body, 'base64url').toString());
-  return payload.exp > Date.now() ? payload : null;
-}
-
-function readCookie(req, name) {
-  for (const part of (req.headers.cookie || '').split(';')) {
-    const [k, ...v] = part.trim().split('=');
-    if (k === name) return decodeURIComponent(v.join('='));
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString());
+    return payload.exp > Date.now() ? payload : null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
-export function setSession(res, user) {
+export function setSession(c, user) {
   const token = sign({ uid: user.id, exp: Date.now() + SESSION_DAYS * 86400_000 });
-  res.cookie(COOKIE, token, { httpOnly: true, sameSite: 'lax', maxAge: SESSION_DAYS * 86400_000 });
+  setCookie(c, COOKIE, token, {
+    httpOnly: true,
+    sameSite: 'Lax',
+    secure: new URL(c.req.url).protocol === 'https:',
+    path: '/',
+    maxAge: SESSION_DAYS * 86400,
+  });
 }
 
-export function clearSession(res) {
-  res.clearCookie(COOKIE);
+export function clearSession(c) {
+  deleteCookie(c, COOKIE, { path: '/' });
 }
 
 // The campaign-launch routine has no browser session: it sends AUTOMATION_TOKEN as a bearer token,
-// which only opens the /ads routes.
-function isAutomation(req) {
+// which only opens the /api/ads routes.
+function isAutomation(c) {
   const token = process.env.AUTOMATION_TOKEN;
-  const given = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (!token || !given || !req.path.startsWith('/ads/')) return false;
+  const given = (c.req.header('authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!token || !given || !c.req.path.startsWith('/api/ads/')) return false;
   return given.length === token.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(token));
 }
 
 export function authMiddleware(db) {
-  return (req, res, next) => {
-    if (isAutomation(req)) {
-      req.user = { id: null, username: 'automation', role: 'admin' };
+  return async (c, next) => {
+    if (isAutomation(c)) {
+      c.set('user', { id: null, username: 'automation', role: 'admin' });
       return next();
     }
-    const session = unsign(readCookie(req, COOKIE));
-    const user = session && db.prepare('SELECT id, username, role FROM users WHERE id = ?').get(session.uid);
-    if (!user) return res.status(401).json({ error: 'غير مسجل' });
-    req.user = user;
-    next();
+    const session = unsign(getCookie(c, COOKIE));
+    const user = session && await db.get('SELECT id, username, role FROM users WHERE id = ?', session.uid);
+    if (!user) return c.json({ error: 'غير مسجل' }, 401);
+    c.set('user', user);
+    return next();
   };
 }
 
-export function requireAdmin(req, res, next) {
-  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'للمدير فقط' });
-  next();
+export async function requireAdmin(c, next) {
+  if (c.get('user')?.role !== 'admin') return c.json({ error: 'للمدير فقط' }, 403);
+  return next();
 }

@@ -1,11 +1,12 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { openDb } from '../src/db.js';
-import { createApp, ensureAdmin } from '../src/server.js';
+import { serve } from '@hono/node-server';
+import { openLocalDb } from '../src/db-local.js';
+import { createApp } from '../src/app.js';
 import { normalizePhone } from '../src/services/orders.js';
 import { mapEcotrackStatus } from '../src/delivery/ecotrack.js';
 
-let server, base, cookie = '';
+let server, base, db, cookie = '';
 
 async function api(method, path, body, { auth = true } = {}) {
   const res = await fetch(base + path, {
@@ -19,12 +20,17 @@ async function api(method, path, body, { auth = true } = {}) {
 }
 
 before(async () => {
-  const db = openDb(':memory:');
-  ensureAdmin(db);
-  server = createApp(db).listen(0);
+  db = await openLocalDb();
+  const app = createApp(db);
+  server = await new Promise((resolve) => {
+    const s = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, () => resolve(s));
+  });
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => server.close());
+after(async () => {
+  server.close();
+  await db.close();
+});
 
 test('phone normalization', () => {
   assert.equal(normalizePhone('+213 555 12 34 56'), '0555123456');

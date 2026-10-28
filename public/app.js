@@ -26,6 +26,8 @@ const wilaya = (code) => {
 const wilayaOptions = (selected) => state.meta.wilayas
   .map((w) => `<option value="${w.code}" ${Number(selected) === w.code ? 'selected' : ''}>${w.code} - ${w.name_ar} / ${w.name_fr}</option>`).join('');
 const today = () => new Date().toISOString().slice(0, 10);
+// Timestamps come from the server in UTC; show them in Algeria time.
+const fmtDate = (v) => (v ? new Date(v).toLocaleString('fr-DZ', { timeZone: 'Africa/Algiers', dateStyle: 'short', timeStyle: 'short' }) : '');
 
 async function api(method, path, body) {
   const res = await fetch(`/api${path}`, {
@@ -280,7 +282,7 @@ async function ordersPage() {
       <tr><th>المرجع</th><th>التاريخ</th><th>الزبون</th><th>الهاتف</th><th>الولاية</th><th>المنتج</th><th>المجموع</th><th>الحالة</th><th>التوصيل</th></tr>
       ${list.rows.map((o) => `<tr class="click" data-id="${o.id}">
         <td>${esc(o.reference)}${o.duplicate_of ? ' <span class="badge warn">مكررة؟</span>' : ''}</td>
-        <td class="muted">${esc(o.created_at.slice(0, 16))}</td>
+        <td class="muted">${esc(fmtDate(o.created_at))}</td>
         <td>${esc(o.customer_name)}</td><td dir="ltr">${esc(o.phone)}</td><td>${wilaya(o.wilaya_code)}</td>
         <td>${esc(o.product_name)} × ${o.quantity}${o.store_name ? ` <span class="muted">${esc(o.store_name)}</span>` : ''}</td><td class="num">${money(o.total)}</td>
         <td>${badge(o.status)}${o.call_attempts ? ` <span class="muted">(${o.call_attempts})</span>` : ''}
@@ -345,7 +347,7 @@ async function openOrder(id) {
     </div>
     <h4>السجل</h4>
     <ul class="timeline">${o.events.map((e) =>
-      `<li><span class="muted">${esc(e.created_at)}</span> · ${esc(EVENT_LABELS[e.type] || e.type)} ${e.message ? `— ${esc(e.message)}` : ''} ${e.username ? `<span class="muted">(${esc(e.username)})</span>` : ''}</li>`).join('')}</ul>`);
+      `<li><span class="muted">${esc(fmtDate(e.created_at))}</span> · ${esc(EVENT_LABELS[e.type] || e.type)} ${e.message ? `— ${esc(e.message)}` : ''} ${e.username ? `<span class="muted">(${esc(e.username)})</span>` : ''}</li>`).join('')}</ul>`);
 
   const after = (r) => {
     toast(r.status === 'dispatched' ? `تبعثت لـ ${r.company_name}${r.tracking ? ` (${r.tracking})` : ''}` : r.dispatch_error ? `مؤكدة، بصح الإرسال فشل: ${r.dispatch_error}` : 'تم', Boolean(r.dispatch_error));
@@ -518,7 +520,7 @@ async function stockDialog(p) {
     </form>
     <div class="table-wrap"><table>
       <tr><th>التاريخ</th><th>الكمية</th><th>السبب</th><th>الطلبية</th></tr>
-      ${moves.map((m) => `<tr><td class="muted">${esc(m.created_at)}</td>
+      ${moves.map((m) => `<tr><td class="muted">${esc(fmtDate(m.created_at))}</td>
         <td class="num ${m.quantity < 0 ? 'neg' : 'pos'}">${m.quantity > 0 ? '+' : ''}${m.quantity}</td>
         <td>${esc(m.reason)}</td><td>${esc(m.reference || '')}</td></tr>`).join('')}
     </table></div>
@@ -730,7 +732,7 @@ async function usersPage() {
     </form>
     <div class="table-wrap"><table>
       <tr><th>الاسم</th><th>الدور</th><th>تاريخ الإنشاء</th><th></th></tr>
-      ${users.map((u) => `<tr><td>${esc(u.username)}</td><td>${u.role === 'admin' ? 'مدير' : 'مؤكدة'}</td><td class="muted">${esc(u.created_at)}</td>
+      ${users.map((u) => `<tr><td>${esc(u.username)}</td><td>${u.role === 'admin' ? 'مدير' : 'مؤكدة'}</td><td class="muted">${esc(fmtDate(u.created_at))}</td>
         <td class="actions"><button class="btn small" data-pass="${u.id}">كلمة السر</button>
         ${u.id === state.user.id ? '' : `<button class="btn small danger" data-del="${u.id}">حذف</button>`}</td></tr>`).join('')}
     </table></div>`);

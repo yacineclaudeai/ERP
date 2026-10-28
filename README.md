@@ -27,9 +27,20 @@
 
 باش تزيد شركة بـ API آخر (Yalidine، ZR Express، Maystro...)، زيد ملف في `src/delivery/` فيه `createShipment` و `getStatus` وسجلو في `src/delivery/index.js`.
 
-## التشغيل
+## التشغيل على Netlify (production)
 
-يلزم Node.js 22.13 ولا أحدث (قاعدة البيانات SQLite مدمجة في Node، ما يلزم حتى برنامج آخر).
+الـ ERP يخدم على Netlify: الواجهة ملفات static (`public/`)، الـ API في Netlify Function (`netlify/functions/api.mjs`)، والتتبع يتحدث كل 30 دقيقة (`netlify/functions/sync-tracking.mjs`). قاعدة البيانات هي Netlify Database (Postgres): Netlify يخلقها ويطبق الـ migrations اللي في `netlify/database/migrations/` وحدو مع كل deploy.
+
+1. اربط الريبو بـ Netlify (Add new project ← Import from GitHub). الإعدادات تتقرا من `netlify.toml`.
+2. في Environment variables زيد:
+   - `SESSION_SECRET`: نص طويل عشوائي (ضروري)
+   - `ADMIN_USERNAME` و `ADMIN_PASSWORD`: حساب المدير الأول
+   - `AUTOMATION_TOKEN`: للروتين تاع إطلاق الحملات (اختياري)
+3. Deploy. أول دخول بحساب المدير، وبدل كلمة السر.
+
+## التشغيل في الكمبيوتر
+
+يلزم Node.js 20.12 ولا أحدث. محلياً قاعدة البيانات Postgres مدمجة (PGlite) في `data/pg`، ولا Postgres حقيقي بـ `DATABASE_URL`.
 
 ```bash
 npm install
@@ -39,13 +50,14 @@ npm run seed             # (اختياري) بيانات تجريبية
 npm test
 ```
 
-أول مرة يتخلق حساب المدير من `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
-
 ## البنية
 
 ```
-src/server.js            Express app
-src/db.js                schéma SQLite
+src/app.js               API HTTP (Hono), partagée par Netlify et le serveur local
+src/server.js            serveur local
+src/db.js                accès Postgres (pg) ; src/db-local.js : PGlite pour local et tests
+netlify/database/migrations/  schéma de la base
+netlify/functions/       api (toutes les routes /api/*) et sync-tracking (toutes les 30 min)
 src/services/orders.js   cycle de vie des commandes, stock, dispatch auto
 src/services/stats.js    statistiques et profit par produit
 src/delivery/            adaptateurs des sociétés de livraison

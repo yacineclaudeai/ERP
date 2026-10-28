@@ -1,18 +1,21 @@
-const range = (col, from, to) => {
+// Calendar day in Algeria for a timestamp column.
+export const localDay = (col) => `(${col} AT TIME ZONE 'Africa/Algiers')::date`;
+
+const range = (dayExpr, from, to) => {
   const where = [];
   const args = [];
-  if (from) where.push(`date(${col}) >= date(?)`), args.push(from);
-  if (to) where.push(`date(${col}) <= date(?)`), args.push(to);
+  if (from) where.push(`${dayExpr} >= ?::date`), args.push(from);
+  if (to) where.push(`${dayExpr} <= ?::date`), args.push(to);
   return { sql: where.length ? where.join(' AND ') : '1=1', args };
 };
 
 const pct = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
 
-export function getStats(db, { from = null, to = null } = {}) {
-  const r = range('o.created_at', from, to);
+export async function getStats(db, { from = null, to = null } = {}) {
+  const r = range(localDay('o.created_at'), from, to);
 
   const byStatus = Object.fromEntries(
-    db.prepare(`SELECT status, COUNT(*) AS n FROM orders o WHERE ${r.sql} GROUP BY status`).all(...r.args)
+    (await db.all(`SELECT status, COUNT(*) AS n FROM orders o WHERE ${r.sql} GROUP BY status`, ...r.args))
       .map((x) => [x.status, x.n]),
   );
   const n = (s) => byStatus[s] || 0;
@@ -20,23 +23,23 @@ export function getStats(db, { from = null, to = null } = {}) {
   const decided = confirmed + n('cancelled');
   const closedShipments = n('delivered') + n('returned');
 
-  const products = db.prepare(`
+  const products = await db.all(`
     SELECT p.id, p.name, p.stock, p.cost, p.store_id, s.name AS store_name,
       COUNT(o.id) AS orders,
-      SUM(o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed,
-      SUM(o.status = 'cancelled') AS cancelled,
-      SUM(o.status = 'delivered') AS delivered,
-      SUM(o.status = 'returned') AS returned,
+      COUNT(o.id) FILTER (WHERE o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed,
+      COUNT(o.id) FILTER (WHERE o.status = 'cancelled') AS cancelled,
+      COUNT(o.id) FILTER (WHERE o.status = 'delivered') AS delivered,
+      COUNT(o.id) FILTER (WHERE o.status = 'returned') AS returned,
       SUM(CASE WHEN o.status = 'delivered' THEN o.unit_price * o.quantity ELSE 0 END) AS revenue,
       SUM(CASE WHEN o.status = 'delivered' THEN p.cost * o.quantity ELSE 0 END) AS cogs
     FROM products p LEFT JOIN stores s ON s.id = p.store_id
     LEFT JOIN orders o ON o.product_id = p.id AND ${r.sql}
-    GROUP BY p.id ORDER BY orders DESC`).all(...r.args);
+    GROUP BY p.id, s.name ORDER BY orders DESC, p.id`, ...r.args);
 
   const ads = range('date', from, to);
   const spend = Object.fromEntries(
-    db.prepare(`SELECT product_id, SUM(amount) AS total FROM ad_spend WHERE ${ads.sql} GROUP BY product_id`)
-      .all(...ads.args).map((x) => [x.product_id, x.total]),
+    (await db.all(`SELECT product_id, SUM(amount) AS total FROM ad_spend WHERE ${ads.sql} GROUP BY product_id`, ...ads.args))
+      .map((x) => [x.product_id, x.total]),
   );
 
   const perProduct = products.map((p) => {
@@ -60,14 +63,15 @@ export function getStats(db, { from = null, to = null } = {}) {
     };
   });
 
-  const byWilaya = db.prepare(`
-    SELECT wilaya_code, COUNT(*) AS orders, SUM(status = 'delivered') AS delivered, SUM(status = 'returned') AS returned
-    FROM orders o WHERE ${r.sql} GROUP BY wilaya_code ORDER BY orders DESC`).all(...r.args);
+  const byWilaya = await db.all(`
+    SELECT wilaya_code, COUNT(*) AS orders, COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
+      COUNT(*) FILTER (WHERE status = 'returned') AS returned
+    FROM orders o WHERE ${r.sql} GROUP BY wilaya_code ORDER BY orders DESC`, ...r.args);
 
-  const daily = db.prepare(`
-    SELECT date(created_at) AS day, COUNT(*) AS orders,
-      SUM(status IN ('confirmed','dispatched','delivered','returned')) AS confirmed
-    FROM orders WHERE created_at >= date('now', '-29 days') GROUP BY day ORDER BY day`).all();
+  const daily = await db.all(`
+    SELECT ${localDay('created_at')} AS day, COUNT(*) AS orders,
+      COUNT(*) FILTER (WHERE status IN ('confirmed','dispatched','delivered','returned')) AS confirmed
+    FROM orders WHERE created_at >= now() - interval '29 days' GROUP BY day ORDER BY day`);
 
   const totals = perProduct.reduce(
     (t, p) => ({ revenue: t.revenue + p.revenue, cogs: t.cogs + p.cogs, ad_spend: t.ad_spend + p.ad_spend, profit: t.profit + p.profit }),
@@ -91,6 +95,6 @@ export function getStats(db, { from = null, to = null } = {}) {
     by_store: byStore,
     by_wilaya: byWilaya,
     daily,
-    low_stock: db.prepare('SELECT id, name, stock FROM products WHERE active = 1 AND stock <= 5 ORDER BY stock').all(),
+    low_stock: await db.all('SELECT id, name, stock FROM products WHERE active AND stock <= 5 ORDER BY stock'),
   };
 }
