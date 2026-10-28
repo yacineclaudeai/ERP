@@ -252,11 +252,12 @@ async function ordersPage() {
   const q = params.get('q') || '';
   const productId = params.get('product_id') || '';
   const storeId = params.get('store_id') || '';
-  const [list, products, stats, stores] = await Promise.all([
+  const [list, products, stats, stores, companies] = await Promise.all([
     api('GET', `/orders?${new URLSearchParams({ status, q, product_id: productId, store_id: storeId, limit: 200 })}`),
     api('GET', '/products'),
     api('GET', '/stats'),
     api('GET', '/stores'),
+    api('GET', '/delivery/companies'),
   ]);
   const tabs = [
     ['new,no_answer,postponed', 'للتأكيد', ['new', 'no_answer', 'postponed']],
@@ -287,36 +288,16 @@ async function ordersPage() {
     <div class="table-wrap"><table class="orders">
       <tr><th></th><th>رقم الطلبية</th><th>التاريخ</th><th>الاسم الكامل</th><th>الهاتف</th><th>محاولات</th><th>الحالة</th>
         <th>البوتيك</th><th>التوصيل</th><th>الولاية / البلدية</th><th>المنتج</th><th>الكمية</th><th>سعر المنتج</th>
-        <th>سعر التوصيل</th><th>المجموع</th><th>التفاصيل</th><th>التأكيد بواسطة</th><th>شركة التوصيل</th></tr>
-      ${list.rows.map((o) => `<tr class="click ${o.source === 'abandoned' ? 'abandoned' : ''}" data-id="${o.id}">
-        <td title="${SOURCE_LABELS[o.source] || o.source}">${SOURCE_ICONS[o.source] || ''}</td>
-        <td>${esc(o.external_id && !o.external_id.startsWith('row-') ? o.external_id : o.reference)}
-          ${o.source === 'abandoned' ? '<span class="badge warn">متروكة</span>' : ''}${o.duplicate_of ? ' <span class="badge warn">مكررة؟</span>' : ''}</td>
-        <td class="muted nowrap">${esc(fmtDate(o.created_at))}</td>
-        <td>${esc(o.customer_name)}</td>
-        <td dir="ltr" class="nowrap">${esc(o.phone)} <a href="${whatsapp(o.phone)}" target="_blank" rel="noopener" data-stop title="WhatsApp">💬</a></td>
-        <td class="num">${o.call_attempts || 0}</td>
-        <td>${badge(o.status)}${o.dispatch_error ? ' <span class="badge cancelled" title="' + esc(o.dispatch_error) + '">خطأ إرسال</span>' : ''}</td>
-        <td class="muted">${esc(o.store_name || '')}</td>
-        <td>${o.stop_desk ? 'مكتب' : 'المنزل'}</td>
-        <td>${wilaya(o.wilaya_code)}<div class="muted">${esc(o.commune || '')}</div></td>
-        <td>${esc(o.product_name)}</td>
-        <td class="num">${o.quantity}</td>
-        <td class="num">${money(o.unit_price)}</td>
-        <td class="num">${money(o.delivery_fee)}</td>
-        <td class="num"><b>${money(o.total)}</b></td>
-        <td class="muted details">${esc(o.notes || '')}</td>
-        <td class="muted">${esc(o.confirmed_by || '')}</td>
-        <td class="muted">${esc(o.company_name || '')} ${esc(o.tracking || '')}</td></tr>`).join('')}
+        <th>سعر التوصيل</th><th>المجموع</th><th>التفاصيل</th><th>التأكيد بواسطة</th><th>شركة التوصيل</th><th>إجراءات</th></tr>
+      ${list.rows.map((o) => orderRow(o, products, companies)).join('')}
     </table></div>`);
-  main.querySelectorAll('[data-stop]').forEach((a) => (a.onclick = (e) => e.stopPropagation()));
+  bindOrderTable(main.querySelector('table.orders'), list.rows, products, companies);
 
   main.querySelectorAll('[data-status]').forEach((b) => (b.onclick = () => go({ status: b.dataset.status })));
   main.querySelector('#filters').onsubmit = (e) => {
     e.preventDefault();
     go(formData(e.target));
   };
-  main.querySelectorAll('tr[data-id]').forEach((tr) => (tr.onclick = () => openOrder(Number(tr.dataset.id))));
   main.querySelector('#new-order').onclick = () => orderForm(null, products);
   const sync = main.querySelector('#sync');
   if (sync) {
@@ -327,6 +308,129 @@ async function ordersPage() {
       router();
     });
   }
+}
+
+// ---------- orders table: inline editing like Ecotrack ----------
+const EDITABLE = ['new', 'no_answer', 'postponed', 'confirmed'];
+// Status choices offered in the table for each current status, and the
+// confirmation action that moves the order there.
+const STATUS_MOVES = {
+  new: ['no_answer', 'postponed', 'confirmed', 'cancelled'],
+  no_answer: ['no_answer', 'postponed', 'confirmed', 'cancelled'],
+  postponed: ['no_answer', 'postponed', 'confirmed', 'cancelled'],
+  confirmed: ['cancelled'],
+  cancelled: ['new'],
+  fake: ['new'],
+  dispatched: ['delivered', 'returned'],
+};
+const MOVE_ACTION = { no_answer: 'no_answer', postponed: 'postpone', confirmed: 'confirm', cancelled: 'cancel', new: 'reopen', delivered: 'delivered', returned: 'returned' };
+
+function statusCell(o) {
+  const moves = STATUS_MOVES[o.status];
+  if (!moves) return badge(o.status);
+  const opts = [o.status, ...moves.filter((s) => s !== o.status)];
+  return `<select class="cell st badge ${o.status}" data-move>${opts.map((s) =>
+    `<option value="${s}" ${s === o.status ? 'selected' : ''}>${STATUS_LABELS[s]}</option>`).join('')}</select>`;
+}
+
+function orderRow(o, products, companies) {
+  const edit = EDITABLE.includes(o.status);
+  const input = (field, value, attrs = '') => `<input class="cell" data-field="${field}" value="${esc(value)}" ${attrs}>`;
+  const num = (field, value, w = 80) => input(field, value ?? '', `type="number" min="0" style="width:${w}px"`);
+  const productSel = edit && !o.stock_reserved
+    ? `<select class="cell" data-field="product_id">${products.filter((p) => p.active || p.id === o.product_id).map((p) =>
+      `<option value="${p.id}" ${p.id === o.product_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`
+    : esc(o.product_name);
+  return `<tr class="click ${o.source === 'abandoned' ? 'abandoned' : ''}" data-id="${o.id}">
+    <td title="${SOURCE_LABELS[o.source] || o.source}">${SOURCE_ICONS[o.source] || ''}</td>
+    <td>${esc(o.external_id && !o.external_id.startsWith('row-') ? o.external_id : o.reference)}
+      ${o.source === 'abandoned' ? '<span class="badge warn">متروكة</span>' : ''}${o.duplicate_of ? ' <span class="badge warn">مكررة؟</span>' : ''}</td>
+    <td class="muted nowrap">${esc(fmtDate(o.created_at))}</td>
+    <td>${edit ? input('customer_name', o.customer_name, 'style="width:150px"') : esc(o.customer_name)}</td>
+    <td dir="ltr" class="nowrap">${edit ? input('phone', o.phone, 'style="width:115px" dir="ltr"') : esc(o.phone)}
+      <a href="${whatsapp(o.phone)}" target="_blank" rel="noopener" title="WhatsApp">💬</a></td>
+    <td class="num nowrap">${o.call_attempts || 0}${['new', 'no_answer', 'postponed'].includes(o.status)
+      ? ' <button class="btn small" data-attempt title="ما ردش: زيد محاولة">+1</button>' : ''}</td>
+    <td class="nowrap">${statusCell(o)}${o.dispatch_error ? ' <span class="badge cancelled" title="' + esc(o.dispatch_error) + '">خطأ إرسال</span>' : ''}</td>
+    <td class="muted">${esc(o.store_name || '')}</td>
+    <td>${edit ? `<select class="cell" data-field="stop_desk"><option value="0">المنزل</option>
+      <option value="1" ${o.stop_desk ? 'selected' : ''}>مكتب</option></select>` : o.stop_desk ? 'مكتب' : 'المنزل'}</td>
+    <td>${edit ? `<select class="cell" data-field="wilaya_code" style="width:150px">${wilayaOptions(o.wilaya_code)}</select>
+      ${input('commune', o.commune || '', 'placeholder="البلدية" style="width:150px;margin-top:4px"')}`
+      : `${wilaya(o.wilaya_code)}<div class="muted">${esc(o.commune || '')}</div>`}</td>
+    <td>${productSel}</td>
+    <td class="num">${edit ? num('quantity', o.quantity, 60).replace('min="0"', 'min="1"') : o.quantity}</td>
+    <td class="num">${edit ? num('unit_price', o.unit_price) : money(o.unit_price)}</td>
+    <td class="num">${edit ? num('delivery_fee', o.delivery_fee, 70) : money(o.delivery_fee)}</td>
+    <td class="num"><b>${money(o.total)}</b></td>
+    <td class="muted details">${edit ? `<textarea class="cell" data-field="notes" rows="1" style="width:180px">${esc(o.notes || '')}</textarea>` : esc(o.notes || '')}</td>
+    <td class="muted">${esc(o.confirmed_by || '')}</td>
+    <td class="muted">${edit ? `<select class="cell" data-field="company_id"><option value="">حسب الولاية</option>
+      ${companies.map((c) => `<option value="${c.id}" ${c.id === o.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`
+      : esc(o.company_name || '')} ${esc(o.tracking || '')}</td>
+    <td class="nowrap">
+      <button class="btn small" data-open title="التفاصيل والسجل">🕑</button>
+      ${edit ? '<button class="btn small" data-edit title="تعديل كامل">✏️</button>' : ''}
+      ${o.status === 'confirmed' ? '<button class="btn small" data-dispatch title="إعادة الإرسال لشركة التوصيل">🚚</button>' : ''}
+    </td></tr>`;
+}
+
+// Every change in the table is saved right away, then only that row is redrawn.
+function bindOrderTable(table, rows, products, companies) {
+  const byId = new Map(rows.map((o) => [o.id, o]));
+  const redraw = (tr, o) => {
+    byId.set(o.id, o);
+    tr.outerHTML = orderRow(o, products, companies);
+  };
+  const save = async (tr, request) => {
+    const id = Number(tr.dataset.id);
+    const old = byId.get(id);
+    tr.classList.add('saving');
+    try {
+      const r = await request(id);
+      const confirmed_by = r.status === 'confirmed' && old.status !== 'confirmed' ? state.user.username : old.confirmed_by;
+      redraw(tr, { ...old, ...r, confirmed_by });
+      if (r.dispatch_error) toast(`مؤكدة، بصح الإرسال فشل: ${r.dispatch_error}`, true);
+      else if (r.status === 'dispatched' && old.status !== 'dispatched') toast(`تبعثت لـ ${r.company_name}${r.tracking ? ` (${r.tracking})` : ''}`);
+      else toast('تم الحفظ');
+    } catch (err) {
+      redraw(tr, old);
+      toast(err.message, true);
+    }
+  };
+
+  table.addEventListener('change', (e) => {
+    const el = e.target;
+    const tr = el.closest('tr[data-id]');
+    if (!tr) return;
+    if (el.matches('[data-move]')) {
+      const action = MOVE_ACTION[el.value];
+      if (action === 'cancel' && !confirm('تأكيد إلغاء الطلبية؟')) return redraw(tr, byId.get(Number(tr.dataset.id)));
+      return save(tr, (id) => api('POST', `/orders/${id}/action`, { action }));
+    }
+    const field = el.dataset.field;
+    if (!field) return;
+    let value = el.value;
+    if (field === 'stop_desk') value = value === '1';
+    if (field === 'company_id') value = value ? Number(value) : null;
+    if (['quantity', 'unit_price', 'delivery_fee', 'wilaya_code', 'product_id'].includes(field)) {
+      if (value === '') return redraw(tr, byId.get(Number(tr.dataset.id)));
+      value = Number(value);
+    }
+    save(tr, (id) => api('PUT', `/orders/${id}`, { [field]: value }));
+  });
+
+  table.addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-id]');
+    if (!tr) return;
+    const id = Number(tr.dataset.id);
+    if (e.target.closest('[data-attempt]')) return save(tr, () => api('POST', `/orders/${id}/action`, { action: 'no_answer' }));
+    if (e.target.closest('[data-edit]')) return orderForm(byId.get(id), products);
+    if (e.target.closest('[data-dispatch]')) return save(tr, () => api('POST', `/orders/${id}/dispatch`, {}));
+    if (e.target.closest('[data-open]')) return openOrder(id);
+    if (e.target.closest('input, select, textarea, a, button')) return;
+    openOrder(id);
+  });
 }
 
 async function openOrder(id) {
@@ -404,8 +508,8 @@ async function orderForm(order, products) {
   const box = modal.open(`
     <h3>${order ? `تعديل ${esc(order.reference)}` : 'طلبية جديدة'}</h3>
     <form class="stack" id="order-form">
-      ${order ? '' : `<label>المنتج<select name="product_id" required>${products.filter((p) => p.active)
-        .map((p) => `<option value="${p.id}">${esc(p.name)} — ${money(p.price)}</option>`).join('')}</select></label>`}
+      ${order?.stock_reserved ? '' : `<label>المنتج<select name="product_id" required>${products.filter((p) => p.active || p.id === o.product_id)
+        .map((p) => `<option value="${p.id}" ${p.id === o.product_id ? 'selected' : ''}>${esc(p.name)} — ${money(p.price)}</option>`).join('')}</select></label>`}
       <div class="grid2">
         <label>الاسم<input name="customer_name" value="${esc(o.customer_name)}" required></label>
         <label>الهاتف<input name="phone" value="${esc(o.phone)}" required dir="ltr"></label>
@@ -430,6 +534,8 @@ async function orderForm(order, products) {
     if (f.unit_price === '') delete f.unit_price;
     if (order) {
       if (f.company_id === '') f.company_id = null;
+      // New product without a hand-typed price: take the new product's price.
+      if (f.product_id && Number(f.product_id) !== o.product_id && Number(f.unit_price) === o.unit_price) delete f.unit_price;
       if (f.wilaya_code != o.wilaya_code || f.stop_desk !== Boolean(o.stop_desk)) delete f.delivery_fee;
       await api('PUT', `/orders/${order.id}`, f);
     } else {

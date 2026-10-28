@@ -215,3 +215,26 @@ test('automation token opens only the ads routes', async () => {
     delete process.env.AUTOMATION_TOKEN;
   }
 });
+
+test('a confirmation agent edits an order from the table, product included', async () => {
+  const a = (await api('POST', '/api/products', { name: 'Parfum A', price: 2500, stock: 5 })).body;
+  const b = (await api('POST', '/api/products', { name: 'Parfum B', price: 3000, stock: 5 })).body;
+  await api('POST', '/api/users', { username: 'agent1', password: 'agent123', role: 'agent' });
+  const o = (await api('POST', '/api/orders', { product_id: a.id, customer_name: 'Test', phone: '0550001122', wilaya_code: 16 })).body;
+
+  await api('POST', '/api/auth/login', { username: 'agent1', password: 'agent123' });
+  let r = await api('PUT', `/api/orders/${o.id}`, { product_id: b.id });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.product_name, 'Parfum B');
+  assert.equal(r.body.unit_price, 3000, 'takes the new product price');
+  r = await api('PUT', `/api/orders/${o.id}`, { stop_desk: true, commune: 'Hydra', quantity: 2 });
+  assert.equal(r.body.commune, 'Hydra');
+  assert.equal(r.body.total, 3000 * 2 + r.body.delivery_fee);
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { phone: '12' })).status, 400);
+
+  // Once confirmed the stock is held: the product can't change any more.
+  await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' });
+  assert.equal((await api('GET', '/api/products')).body.find((p) => p.id === b.id).stock, 3);
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: a.id })).status, 409);
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+});

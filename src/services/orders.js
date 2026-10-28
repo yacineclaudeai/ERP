@@ -133,8 +133,16 @@ export async function updateOrder(db, id, input, userId = null) {
     const order = await getOrder(t, id, { lock: true });
     if (!EDITABLE.includes(order.status)) throw new HttpError(409, 'لا يمكن تعديل طلبية بعد إرسالها');
     const f = validateOrderFields({ ...order, ...input });
-    const route = await resolveRoute(t, f.wilaya_code, order.store_id);
-    const unit_price = input.unit_price != null ? Number(input.unit_price) : order.unit_price;
+    // The product can change only while no stock is held for the order.
+    let product = null;
+    if (input.product_id != null && Number(input.product_id) !== order.product_id) {
+      if (order.stock_reserved) throw new HttpError(409, 'لا يمكن تبديل المنتج بعد التأكيد، ألغي الطلبية وعاود');
+      product = await t.get('SELECT * FROM products WHERE id = ?', Number(input.product_id) || 0);
+      if (!product) throw new HttpError(404, 'المنتج غير موجود');
+    }
+    const storeId = product ? product.store_id : order.store_id;
+    const route = await resolveRoute(t, f.wilaya_code, storeId);
+    const unit_price = input.unit_price != null ? Number(input.unit_price) : product ? product.price : order.unit_price;
     const delivery_fee = input.delivery_fee != null
       ? Number(input.delivery_fee)
       : (f.wilaya_code !== order.wilaya_code || f.stop_desk !== order.stop_desk)
@@ -142,20 +150,20 @@ export async function updateOrder(db, id, input, userId = null) {
         : order.delivery_fee;
     const company_id = input.company_id !== undefined
       ? (input.company_id ? Number(input.company_id) : null)
-      : f.wilaya_code !== order.wilaya_code ? route.company_id : order.company_id;
+      : f.wilaya_code !== order.wilaya_code || storeId !== order.store_id ? route.company_id : order.company_id;
 
     if (order.stock_reserved && f.quantity !== order.quantity) {
       await moveStock(t, order.product_id, id, order.quantity - f.quantity, 'تعديل الكمية');
     }
     await t.run(`
-      UPDATE orders SET customer_name = ?, phone = ?, phone2 = ?, wilaya_code = ?, commune = ?, address = ?,
+      UPDATE orders SET product_id = ?, customer_name = ?, phone = ?, phone2 = ?, wilaya_code = ?, commune = ?, address = ?,
         stop_desk = ?, notes = ?, quantity = ?, unit_price = ?, delivery_fee = ?, total = ?, company_id = ?,
         updated_at = now()
       WHERE id = ?`,
-      f.customer_name, f.phone, f.phone2, f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes,
+      product ? product.id : order.product_id, f.customer_name, f.phone, f.phone2, f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes,
       f.quantity, unit_price, delivery_fee, unit_price * f.quantity + delivery_fee, company_id, id,
     );
-    await logEvent(t, id, 'edited', null, userId);
+    await logEvent(t, id, 'edited', product ? `المنتج: ${product.name}` : null, userId);
     return getOrder(t, id);
   });
 }

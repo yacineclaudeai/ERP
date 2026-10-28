@@ -106,3 +106,8 @@ table.orders td { font-size: 13px; }
 table.orders td.details { max-width: 220px; white-space: normal; }
 table.orders tr.abandoned { background: #fff7ed; }
 .nowrap { white-space: nowrap; }
+table.orders td { vertical-align: middle; }
+table.orders .cell { padding: 4px 6px; font-size: 13px; border-radius: 6px; width: auto; max-width: 220px; }
+table.orders textarea.cell { resize: vertical; min-height: 30px; }
+table.orders select.st { border: 0; cursor: pointer; padding: 4px 8px; border-radius: 12px; }
+table.orders tr.saving { opacity: .5; pointer-events: none; }
