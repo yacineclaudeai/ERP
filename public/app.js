@@ -697,7 +697,8 @@ const SHEET_FIELD_LABELS = {
   customer_name: 'الاسم الكامل *', phone: 'رقم الهاتف *', product_name: 'اسم المنتج *', external_id: 'رقم الطلبية',
   address: 'العنوان', delivery_type: 'نوعية التوصيل', wilaya: 'الولاية *', commune: 'البلدية',
   subtotal: 'سعر المنتج', quantity: 'الكمية', shipping_price: 'سعر التوصيل', discount: 'تخفيض',
-  total: 'السعر الكلي', notes: 'ملاحظة', phone2: 'هاتف 02', sku: 'SKU',
+  total: 'السعر الكلي', notes: 'ملاحظة', phone2: 'هاتف 02', sku: 'SKU', variant: 'المقاس واللون',
+  created_at: 'تاريخ الطلبية',
 };
 
 async function sheetsPage() {

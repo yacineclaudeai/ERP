@@ -21,6 +21,8 @@ export const SHEET_FIELDS = {
   discount: ['discount', 'remise', 'تخفيض'],
   total: ['order total', 'total', 'السعر الكلي'],
   notes: ['note', 'notes', 'comment', 'comments', 'ملاحظة', 'التعليقات'],
+  variant: ['item title', 'variant', 'options', 'المقاس واللون'],
+  created_at: ['created at', 'order date', 'date', 'التاريخ'],
 };
 const REQUIRED = ['customer_name', 'phone', 'wilaya'];
 const MAX_ROWS_PER_SYNC = 300;
@@ -73,20 +75,32 @@ export async function fetchSheetRows(url) {
   return parseCsv(await res.text());
 }
 
-// Header name per field, exact names first, then partial matches; a column is used once.
+// Header name per field: exact names first, in the order listed (so "Shipping City" wins over "City"),
+// then partial matches; a column is used once.
 export function suggestMapping(headers) {
   const folded = headers.map(fold);
   const used = new Set();
   const mapping = {};
+  const match = { exact: (h, n) => h === n, partial: (h, n) => n.length > 3 && h.includes(n) };
   for (const pass of ['exact', 'partial']) {
     for (const [field, names] of Object.entries(SHEET_FIELDS)) {
-      if (mapping[field]) continue;
-      const i = folded.findIndex((h, idx) => !used.has(idx) && h && names.some((n) =>
-        pass === 'exact' ? h === fold(n) : fold(n).length > 3 && h.includes(fold(n))));
-      if (i >= 0) mapping[field] = headers[i], used.add(i);
+      for (const n of names) {
+        if (mapping[field]) break;
+        const i = folded.findIndex((h, idx) => !used.has(idx) && h && match[pass](h, fold(n)));
+        if (i >= 0) mapping[field] = headers[i], used.add(i);
+      }
     }
   }
   return mapping;
+}
+
+// "2026-06-25 16:51:00" as written by LightFunnels, in Algeria's time (UTC+1, no DST).
+export function parseSheetDate(value) {
+  const v = String(value ?? '').trim();
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return null;
+  const d = new Date(`${m[1]}-${m[2]}-${m[3]}T${(m[4] || '0').padStart(2, '0')}:${m[5] || '00'}:${m[6] || '00'}+01:00`);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 // "16", "16 - Alger", "Alger", "الجزائر", "Bejaia"...
@@ -140,7 +154,8 @@ export function rowToOrder(get, kind) {
   const unit_price = subtotal != null ? subtotal / quantity
     : total != null ? Math.max(0, total - (shipping || 0)) / quantity : null;
   const discount = number(get('discount'));
-  const notes = [get('notes'), discount ? `تخفيض: ${discount}` : null].filter((x) => String(x ?? '').trim()).join(' | ');
+  const notes = [get('variant'), get('notes'), discount ? `تخفيض: ${discount}` : null]
+    .filter((x) => String(x ?? '').trim()).join(' | ');
   return {
     customer_name: String(get('customer_name')).trim(),
     phone,
@@ -155,6 +170,7 @@ export function rowToOrder(get, kind) {
     total,
     notes: notes || null,
     status: kind === 'fake' ? 'fake' : 'new',
+    created_at: parseSheetDate(get('created_at')),
   };
 }
 
@@ -177,7 +193,9 @@ export async function importSheet(db, source, { rows = null } = {}) {
     result.last_row = n;
     if (!cells || cells.every((x) => !String(x).trim())) continue;
     const get = (f) => (col[f] == null ? null : cells[col[f]]?.trim() ?? null);
-    const externalId = get('external_id') || `row-${n}`;
+    // Abandoned-checkout sheets put the same text ("Abandoned checkout") in Order ID: only a value with a digit is an id.
+    const orderId = get('external_id');
+    const externalId = /\d/.test(orderId || '') ? orderId : `row-${n}`;
     try {
       if (await db.get('SELECT id FROM orders WHERE sheet_source_id = ? AND external_id = ?', source.id, externalId)) {
         result.skipped++;
@@ -185,9 +203,10 @@ export async function importSheet(db, source, { rows = null } = {}) {
       }
       const order = rowToOrder(get, source.kind);
       const productId = await productFor(db, source, get('product_name') || get('sku'), get('sku'), order.unit_price);
-      await createOrder(db, { ...order, product_id: productId }, {
+      const created = await createOrder(db, { ...order, product_id: productId }, {
         source: 'sheet', sheet: { source_id: source.id, external_id: externalId, name: source.name },
       });
+      if (order.created_at) await db.run('UPDATE orders SET created_at = ? WHERE id = ?', order.created_at, created.id);
       result.imported++;
     } catch (e) {
       if (!(e instanceof HttpError) && e.code !== '23505') throw e;

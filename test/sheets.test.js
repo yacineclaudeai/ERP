@@ -3,11 +3,16 @@ import assert from 'node:assert/strict';
 import { serve } from '@hono/node-server';
 import { openLocalDb } from '../src/db-local.js';
 import { createApp } from '../src/app.js';
-import { parseCsv, parseSheetUrl, parseWilaya, suggestMapping } from '../src/services/sheets.js';
+import { parseCsv, parseSheetDate, parseSheetUrl, parseWilaya, suggestMapping } from '../src/services/sheets.js';
 
+// The columns of a LightFunnels export, in its order.
+const LF_HEADERS = ['Full Name', 'Phone', 'Address', 'Country', 'City', 'Product Name', 'Quantity', 'SKU', 'Funnel Name',
+  'Order ID', 'Subtotal', 'Shipping Price', 'Order Total', 'Created At', 'Fulfillment Status', 'Shipping Method',
+  'Shipping State', 'Shipping City', 'Item title'];
 const HEADERS = ['Order ID', 'Full Name', 'Phone', 'Product Name', 'Quantity', 'Subtotal', 'Shipping Price',
   'Order Total', 'Shipping Method', 'Shipping State', 'Shipping City', 'Address'];
-const csv = (rows) => [HEADERS, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+const toCsv = (rows) => rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+const csv = (rows) => toCsv([HEADERS, ...rows]);
 
 // Google Sheets answers with the CSV of whichever sheet id the test put here.
 const sheets = {};
@@ -59,6 +64,16 @@ test('csv, sheet links, wilayas and column guessing', () => {
   assert.equal(parseWilaya('وهران'), 31);
   assert.equal(parseWilaya('05'), 5);
   assert.equal(parseWilaya('Paris'), null);
+  assert.deepEqual(suggestMapping(LF_HEADERS), {
+    customer_name: 'Full Name', phone: 'Phone', product_name: 'Product Name', sku: 'SKU', external_id: 'Order ID',
+    address: 'Address', delivery_type: 'Shipping Method', wilaya: 'Shipping State', commune: 'Shipping City',
+    quantity: 'Quantity', subtotal: 'Subtotal', shipping_price: 'Shipping Price', total: 'Order Total',
+    variant: 'Item title', created_at: 'Created At',
+  });
+  assert.equal(parseSheetDate('2026-06-25 16:51:00'), '2026-06-25T15:51:00.000Z');
+  assert.equal(parseWilaya('Tizi-Ouzou'), 15);
+  assert.equal(parseWilaya("M'Sila"), 28);
+  assert.equal(parseWilaya('Bordj Bou Arreridj'), 34);
   assert.deepEqual(suggestMapping(HEADERS), {
     customer_name: 'Full Name', phone: 'Phone', product_name: 'Product Name', external_id: 'Order ID',
     delivery_type: 'Shipping Method', wilaya: 'Shipping State', commune: 'Shipping City', address: 'Address',
@@ -152,4 +167,26 @@ test('a sheet without the required columns reports what is missing', async () =>
   assert.equal(r.imported, 0);
   assert.match(r.errors[0], /phone/);
   assert.match((await api('GET', '/api/sheets')).body.find((g) => g.id === id).last_error, /أعمدة ناقصة/);
+});
+
+test('abandoned checkouts: same "Order ID" text on every row, LightFunnels date and variant kept', async () => {
+  sheets['abandoned'] = toCsv([LF_HEADERS,
+    ['Client Un ', '550101010', '', 'Algeria', 'Ras El Oued', 'Pyjama 3 pcs love', 1, '', 'PYjAMA7COULEURS',
+      'Abandoned checkout', 1900, '', 1900, '2026-06-26 20:03:08', '', '', 'Bordj Bou Arreridj', 'Ras El Oued', 'Pyjama 3 pcs love TAILLE:36/S'],
+    ['Client Deux ', '770202020', '', 'Algeria', 'Ain Boucif', 'Pyjama 4 pcs', 1, '', 'pyjama4pcsnoir',
+      'Abandoned checkout', 1900, '', 1900, '2026-06-26 20:07:00', '', '', 'Médéa', 'Ain Boucif', 'Pyjama 4 pcs taille:M/38'],
+    ['', '0', '', 'Algeria', '', 'Pyjama 3 pcs love', 1, '', '', 'Abandoned checkout', 1900, '', 1900, '2026-06-26 21:41:55', '', '', '', '', ''],
+  ]);
+  const url = 'https://docs.google.com/spreadsheets/d/abandoned/edit';
+  const preview = (await api('POST', '/api/sheets/preview', { sheet_url: url })).body;
+  const { id } = (await api('POST', '/api/sheets', { name: 'abandoned', sheet_url: url, kind: 'fake', mapping: preview.mapping, start_row: 2 })).body;
+  const r = (await api('POST', `/api/sheets/${id}/sync`)).body;
+  assert.equal(r.imported, 2);
+  assert.equal(r.errors.length, 1);
+  const rows = (await api('GET', '/api/orders?status=fake&q=Client Deux')).body.rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].wilaya_code, 26);
+  assert.equal(rows[0].phone, '0770202020');
+  assert.equal(rows[0].notes, 'Pyjama 4 pcs taille:M/38');
+  assert.equal(new Date(rows[0].created_at).toISOString(), '2026-06-26T19:07:00.000Z');
 });
