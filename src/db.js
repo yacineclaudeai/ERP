@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS products (
   stock INTEGER NOT NULL DEFAULT 0,
   landing_url TEXT,
   public_key TEXT NOT NULL UNIQUE,
+  store_id INTEGER REFERENCES stores(id) ON DELETE SET NULL,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -32,6 +33,22 @@ CREATE TABLE IF NOT EXISTS delivery_companies (
   api_token TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- A store (boutique) ships through its own delivery account by default.
+CREATE TABLE IF NOT EXISTS stores (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  company_id INTEGER REFERENCES delivery_companies(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-store exceptions: this wilaya goes through another company.
+CREATE TABLE IF NOT EXISTS store_routes (
+  store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  wilaya_code INTEGER NOT NULL CHECK (wilaya_code BETWEEN 1 AND 58),
+  company_id INTEGER NOT NULL REFERENCES delivery_companies(id) ON DELETE CASCADE,
+  PRIMARY KEY (store_id, wilaya_code)
 );
 
 -- Which company delivers each wilaya, and what the customer pays for shipping there.

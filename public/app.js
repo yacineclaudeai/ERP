@@ -81,6 +81,7 @@ const NAV = [
   ['#/', 'لوحة التحكم'],
   ['#/orders', 'الطلبيات'],
   ['#/products', 'المنتجات'],
+  ['#/stores', 'البوتيكات', 'admin'],
   ['#/delivery', 'التوصيل', 'admin'],
   ['#/ads', 'مصاريف الإشهار', 'admin'],
   ['#/users', 'المستخدمين', 'admin'],
@@ -112,6 +113,7 @@ const ROUTES = {
   '#/': dashboardPage,
   '#/orders': ordersPage,
   '#/products': productsPage,
+  '#/stores': storesPage,
   '#/delivery': deliveryPage,
   '#/ads': adsPage,
   '#/users': usersPage,
@@ -205,6 +207,13 @@ async function dashboardPage() {
         <td class="num ${p.profit < 0 ? 'neg' : 'pos'}">${money(p.profit)}</td>
         <td class="num ${p.stock <= 5 ? 'neg' : ''}">${p.stock}</td></tr>`).join('')}
     </table></div>
+    ${s.by_store.length > 1 || s.by_store[0]?.store_id ? `<h3>حسب البوتيك</h3>
+    <div class="table-wrap"><table>
+      <tr><th>البوتيك</th><th>طلبيات</th><th>مستلمة</th><th>روتور</th><th>المبيعات</th><th>الإشهار</th><th>الفايدة</th></tr>
+      ${s.by_store.map((b) => `<tr><td>${esc(b.store_name || 'بلا بوتيك')}</td><td class="num">${b.orders}</td>
+        <td class="num">${b.delivered}</td><td class="num">${b.returned}</td><td class="num">${money(b.revenue)}</td>
+        <td class="num">${money(b.ad_spend)}</td><td class="num ${b.profit < 0 ? 'neg' : 'pos'}">${money(b.profit)}</td></tr>`).join('')}
+    </table></div>` : ''}
     <h3>حسب الولاية</h3>
     <div class="table-wrap"><table>
       <tr><th>الولاية</th><th>طلبيات</th><th>مستلمة</th><th>روتور</th><th>نسبة التوصيل</th></tr>
@@ -234,10 +243,12 @@ async function ordersPage() {
   const status = params.get('status') ?? 'new,no_answer,postponed';
   const q = params.get('q') || '';
   const productId = params.get('product_id') || '';
-  const [list, products, stats] = await Promise.all([
-    api('GET', `/orders?${new URLSearchParams({ status, q, product_id: productId, limit: 200 })}`),
+  const storeId = params.get('store_id') || '';
+  const [list, products, stats, stores] = await Promise.all([
+    api('GET', `/orders?${new URLSearchParams({ status, q, product_id: productId, store_id: storeId, limit: 200 })}`),
     api('GET', '/products'),
     api('GET', '/stats'),
+    api('GET', '/stores'),
   ]);
   const tabs = [
     ['new,no_answer,postponed', 'للتأكيد', ['new', 'no_answer', 'postponed']],
@@ -245,7 +256,7 @@ async function ordersPage() {
     ['', 'الكل', Object.keys(STATUS_LABELS)],
   ];
   const go = (patch) => {
-    const p = new URLSearchParams({ status, q, product_id: productId, ...patch });
+    const p = new URLSearchParams({ status, q, product_id: productId, store_id: storeId, ...patch });
     location.hash = `#/orders?${p}`;
   };
 
@@ -258,6 +269,8 @@ async function ordersPage() {
       <input class="grow" name="q" placeholder="بحث: الاسم، الهاتف، المرجع، التراكينغ" value="${esc(q)}">
       <select name="product_id"><option value="">كل المنتجات</option>
         ${products.map((p) => `<option value="${p.id}" ${String(p.id) === productId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+      ${stores.length ? `<select name="store_id"><option value="">كل البوتيكات</option>
+        ${stores.map((s) => `<option value="${s.id}" ${String(s.id) === storeId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>` : ''}
       <button class="btn">بحث</button>
       <button class="btn primary" type="button" id="new-order">+ طلبية يدوية</button>
       ${state.user.role === 'admin' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
@@ -269,7 +282,7 @@ async function ordersPage() {
         <td>${esc(o.reference)}${o.duplicate_of ? ' <span class="badge warn">مكررة؟</span>' : ''}</td>
         <td class="muted">${esc(o.created_at.slice(0, 16))}</td>
         <td>${esc(o.customer_name)}</td><td dir="ltr">${esc(o.phone)}</td><td>${wilaya(o.wilaya_code)}</td>
-        <td>${esc(o.product_name)} × ${o.quantity}</td><td class="num">${money(o.total)}</td>
+        <td>${esc(o.product_name)} × ${o.quantity}${o.store_name ? ` <span class="muted">${esc(o.store_name)}</span>` : ''}</td><td class="num">${money(o.total)}</td>
         <td>${badge(o.status)}${o.call_attempts ? ` <span class="muted">(${o.call_attempts})</span>` : ''}
           ${o.dispatch_error ? ' <span class="badge cancelled" title="' + esc(o.dispatch_error) + '">خطأ إرسال</span>' : ''}</td>
         <td class="muted">${esc(o.company_name || '')} ${esc(o.tracking || '')}</td></tr>`).join('')}
@@ -305,7 +318,7 @@ async function openOrder(id) {
       <div><div class="muted">الهاتف</div><a href="tel:${esc(o.phone)}" dir="ltr">${esc(o.phone)}</a>${o.phone2 ? ` / <a href="tel:${esc(o.phone2)}" dir="ltr">${esc(o.phone2)}</a>` : ''}</div>
       <div><div class="muted">الولاية / البلدية</div>${wilaya(o.wilaya_code)} / ${esc(o.commune || '—')}</div>
       <div><div class="muted">العنوان</div>${esc(o.address || '—')} ${o.stop_desk ? '<span class="badge">مكتب</span>' : ''}</div>
-      <div><div class="muted">المنتج</div>${esc(o.product_name)} × ${o.quantity}</div>
+      <div><div class="muted">المنتج</div>${esc(o.product_name)} × ${o.quantity}${o.store_name ? ` <span class="muted">(${esc(o.store_name)})</span>` : ''}</div>
       <div><div class="muted">المجموع</div>${money(o.unit_price * o.quantity)} + توصيل ${money(o.delivery_fee)} = <b>${money(o.total)}</b></div>
       <div><div class="muted">شركة التوصيل</div>${esc(o.company_name || 'غير محددة')} ${esc(o.tracking || '')}</div>
       <div><div class="muted">المصدر</div>${o.source === 'landing' ? 'صفحة الهبوط' : 'يدوي'} ${o.utm_campaign ? `· ${esc(o.utm_campaign)}` : ''}</div>
@@ -407,15 +420,16 @@ async function orderForm(order, products) {
 
 // ---------- products ----------
 async function productsPage() {
-  const products = await api('GET', '/products');
+  const [products, stores] = await Promise.all([api('GET', '/products'), api('GET', '/stores')]);
   const isAdmin = state.user.role === 'admin';
   const main = shell(`
     <h2>المنتجات</h2>
     ${isAdmin ? '<div class="bar"><button class="btn primary" id="add">+ منتج جديد</button></div>' : ''}
     <div class="table-wrap"><table>
-      <tr><th>المنتج</th><th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
+      <tr><th>المنتج</th><th>البوتيك</th><th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
       ${products.map((p) => `<tr>
         <td>${esc(p.name)} ${p.sku ? `<span class="muted">${esc(p.sku)}</span>` : ''} ${p.active ? '' : '<span class="badge">موقف</span>'}</td>
+        <td>${esc(p.store_name || '—')}</td>
         <td class="num">${money(p.price)}</td><td class="num">${money(p.cost)}</td>
         <td class="num ${p.stock <= 5 ? 'neg' : ''}">${p.stock}</td>
         <td>${p.landing_url ? `<a href="${esc(p.landing_url)}" target="_blank" rel="noopener">فتح</a>` : '<span class="muted">—</span>'}</td>
@@ -429,13 +443,13 @@ async function productsPage() {
 
   const byId = (id) => products.find((p) => p.id === Number(id));
   const add = main.querySelector('#add');
-  if (add) add.onclick = () => productForm(null);
-  main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => productForm(byId(b.dataset.edit))));
+  if (add) add.onclick = () => productForm(null, stores);
+  main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => productForm(byId(b.dataset.edit), stores)));
   main.querySelectorAll('[data-embed]').forEach((b) => (b.onclick = () => embedDialog(byId(b.dataset.embed))));
   main.querySelectorAll('[data-stock]').forEach((b) => (b.onclick = guard(() => stockDialog(byId(b.dataset.stock)))));
 }
 
-function productForm(p) {
+function productForm(p, stores) {
   const x = p || { active: 1 };
   const box = modal.open(`
     <h3>${p ? 'تعديل المنتج' : 'منتج جديد'}</h3>
@@ -446,6 +460,8 @@ function productForm(p) {
         <label>سعر البيع<input name="price" type="number" value="${x.price ?? ''}" required></label>
         <label>سعر الشراء<input name="cost" type="number" value="${x.cost ?? ''}"></label>
         ${p ? '' : '<label>المخزون الأولي<input name="stock" type="number" value="0"></label>'}
+        <label>البوتيك<select name="store_id"><option value="">—</option>${stores
+          .map((s) => `<option value="${s.id}" ${s.id === x.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
       </div>
       <label>رابط صفحة الهبوط<input name="landing_url" value="${esc(x.landing_url)}" placeholder="https://..." dir="ltr"></label>
       <label class="check"><input type="checkbox" name="active" ${x.active ? 'checked' : ''}> مفعل (يستقبل طلبيات)</label>
@@ -531,7 +547,7 @@ async function deliveryPage() {
     </table></div>
 
     <h2>التوزيع حسب الولاية</h2>
-    <p class="muted">كي تتأكد طلبية، تتبعث أوتوماتيكيا للشركة المربوطة بالولاية تاعها. الولايات بلا شركة تروح للشركة الافتراضية. سعر التوصيل هنا هو اللي يتزاد للزبون في الفورم.</p>
+    <p class="muted">كي تتأكد طلبية، تتبعث أوتوماتيكيا لحساب التوصيل تاع البوتيك تاعها (صفحة "البوتيكات"). إذا البوتيك ما عندهاش حساب، تروح للشركة المربوطة بالولاية هنا. الولايات بلا شركة تروح للشركة الافتراضية. سعر التوصيل هنا هو اللي يتزاد للزبون في الفورم.</p>
     <form id="routes">
       <div class="card grid3">
         <label>الشركة الافتراضية<select name="default_company_id">${companyOptions(routing.default_company_id, '— بلا —')}</select></label>
@@ -590,6 +606,80 @@ function companyForm(c) {
     const f = formData(e.target);
     f.active = Boolean(f.active);
     await (c ? api('PUT', `/delivery/companies/${c.id}`, f) : api('POST', '/delivery/companies', f));
+    modal.close();
+    toast('تم الحفظ');
+    router();
+  });
+}
+
+// ---------- stores ----------
+async function storesPage() {
+  const [stores, companies] = await Promise.all([api('GET', '/stores'), api('GET', '/delivery/companies')]);
+  const main = shell(`
+    <h2>البوتيكات</h2>
+    <p class="muted">كل بوتيك تبعث الطلبيات المؤكدة لحساب التوصيل تاعها. تقدر تزيد استثناءات: ولايات تروح لشركة أخرى. المنتجات تتربط بالبوتيك من صفحة "المنتجات".</p>
+    <div class="bar"><button class="btn primary" id="add">+ بوتيك</button></div>
+    <div class="table-wrap"><table>
+      <tr><th>البوتيك</th><th>حساب التوصيل</th><th>استثناءات حسب الولاية</th><th>منتجات</th><th></th></tr>
+      ${stores.map((s) => `<tr><td>${esc(s.name)}</td><td>${esc(s.company_name || '— (حسب الولاية)')}</td>
+        <td class="muted">${s.routes.map((r) => `${wilaya(r.wilaya_code)} ← ${esc(r.company_name)}`).join('، ') || '—'}</td>
+        <td class="num">${s.products_count}</td>
+        <td><button class="btn small" data-edit="${s.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">زيد البوتيك الأولى</td></tr>'}
+    </table></div>`);
+  main.querySelector('#add').onclick = () => storeForm(null, companies);
+  main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => storeForm(stores.find((s) => s.id === Number(b.dataset.edit)), companies)));
+}
+
+function storeForm(store, companies) {
+  const x = store || { routes: [] };
+  const companyOptions = (selected) => companies
+    .map((c) => `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+  const routeRow = (r = {}) => `<div class="grid2 route-row">
+    <select name="wilaya_code">${wilayaOptions(r.wilaya_code)}</select>
+    <div class="actions"><select name="company_id" style="flex:1">${companyOptions(r.company_id)}</select>
+    <button class="btn small danger" type="button" data-remove>✕</button></div></div>`;
+  const box = modal.open(`
+    <h3>${store ? `تعديل ${esc(store.name)}` : 'بوتيك جديدة'}</h3>
+    <form class="stack" id="store-form">
+      <label>الاسم<input name="name" value="${esc(x.name)}" required></label>
+      <label>حساب التوصيل تاع البوتيك<select name="company_id"><option value="">— حسب الولاية (صفحة التوصيل)</option>${companyOptions(x.company_id)}</select></label>
+      <div class="muted">استثناءات: هاد الولايات تروح لشركة أخرى</div>
+      <div class="stack" id="routes">${x.routes.map(routeRow).join('')}</div>
+      <div><button class="btn small" type="button" id="add-route">+ استثناء</button></div>
+      <div class="actions">
+        <button class="btn primary">حفظ</button>
+        ${store ? '<button class="btn danger" type="button" data-delete>حذف</button>' : ''}
+        <button class="btn" type="button" data-close>إلغاء</button>
+      </div>
+    </form>`);
+  const routes = box.querySelector('#routes');
+  const bindRemove = () => routes.querySelectorAll('[data-remove]').forEach((b) => (b.onclick = () => b.closest('.route-row').remove()));
+  bindRemove();
+  box.querySelector('#add-route').onclick = () => {
+    if (!companies.length) return toast('زيد شركة توصيل الأولى', true);
+    routes.insertAdjacentHTML('beforeend', routeRow());
+    bindRemove();
+  };
+  const del = box.querySelector('[data-delete]');
+  if (del) {
+    del.onclick = guard(async () => {
+      if (!confirm('حذف البوتيك؟ المنتجات تبقى بلا بوتيك.')) return;
+      await api('DELETE', `/stores/${store.id}`);
+      modal.close();
+      router();
+    });
+  }
+  box.querySelector('#store-form').onsubmit = guard(async (e) => {
+    e.preventDefault();
+    const body = {
+      name: e.target.elements.name.value,
+      company_id: e.target.company_id.value || null,
+      routes: [...routes.querySelectorAll('.route-row')].map((row) => ({
+        wilaya_code: Number(row.querySelector('[name=wilaya_code]').value),
+        company_id: Number(row.querySelector('[name=company_id]').value),
+      })),
+    };
+    await (store ? api('PUT', `/stores/${store.id}`, body) : api('POST', '/stores', body));
     modal.close();
     toast('تم الحفظ');
     router();

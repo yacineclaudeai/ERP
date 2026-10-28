@@ -13,13 +13,18 @@ for (let code = 1; code <= 58; code++) {
     .run(code, code === 16 ? 400 : 700, code === 16 ? 300 : 450);
 }
 
+const dhd = db.prepare(`INSERT INTO delivery_companies (name, provider) VALUES ('DHD test', 'sandbox')`).run().lastInsertRowid;
+const storeA = db.prepare('INSERT INTO stores (name, company_id) VALUES (?, ?)').run('Boutique A', company.lastInsertRowid).lastInsertRowid;
+const storeB = db.prepare('INSERT INTO stores (name, company_id) VALUES (?, ?)').run('Boutique B', dhd).lastInsertRowid;
+db.prepare('INSERT INTO store_routes (store_id, wilaya_code, company_id) VALUES (?, 35, ?)').run(storeA, dhd);
+
 const products = [
   ['Montre connectée', 4900, 2100, 40],
   ['Sac à main', 3200, 1300, 25],
   ['Lampe LED', 2500, 900, 4],
 ].map(([name, price, cost, stock], i) => {
-  const r = db.prepare('INSERT INTO products (name, price, cost, stock, public_key, landing_url) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(name, price, cost, stock, `demo-key-${i + 1}`, `https://example.com/produit-${i + 1}`);
+  const r = db.prepare('INSERT INTO products (name, price, cost, stock, public_key, landing_url, store_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(name, price, cost, stock, `demo-key-${i + 1}`, `https://example.com/produit-${i + 1}`, i === 1 ? storeB : storeA);
   return Number(r.lastInsertRowid);
 });
 

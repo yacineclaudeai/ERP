@@ -138,3 +138,24 @@ test('ecotrack sends api_token as a query parameter and accepts base_url with /a
     globalThis.fetch = realFetch;
   }
 });
+
+test('a store ships through its own account, with per-wilaya exceptions', async () => {
+  const hhd = (await api('POST', '/api/delivery/companies', { name: 'HHD', provider: 'sandbox' })).body;
+  const dhd = (await api('POST', '/api/delivery/companies', { name: 'DHD', provider: 'sandbox' })).body;
+  const store = (await api('POST', '/api/stores', {
+    name: 'YACINE', company_id: hhd.id, routes: [{ wilaya_code: 35, company_id: dhd.id }],
+  })).body;
+  const product = (await api('POST', '/api/products', { name: 'Parfum', price: 2900, stock: 5, store_id: store.id })).body;
+
+  const send = async (wilaya) => {
+    const o = (await api('POST', '/api/orders', { product_id: product.id, customer_name: 'Z', phone: `055${wilaya}000000`.slice(0, 10), wilaya_code: wilaya })).body;
+    return (await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' })).body;
+  };
+  assert.equal((await send(16)).company_name, 'HHD');
+  assert.equal((await send(35)).company_name, 'DHD');
+
+  const stores = (await api('GET', '/api/stores')).body;
+  assert.equal(stores.find((s) => s.name === 'YACINE').routes.length, 1);
+  const stats = (await api('GET', '/api/stats')).body;
+  assert.equal(stats.by_store.find((s) => s.store_name === 'YACINE').orders, 2);
+});

@@ -22,11 +22,21 @@ export function normalizePhone(raw) {
   return /^0\d{8,9}$/.test(p) ? p : null;
 }
 
-export function resolveRoute(db, wilayaCode) {
+// Company choice, most specific first: the store's exception for this wilaya,
+// the store's own account, the global wilaya route, then the default company.
+// Shipping fees always come from the global wilaya table.
+export function resolveRoute(db, wilayaCode, storeId = null) {
   const route = db.prepare('SELECT * FROM delivery_routes WHERE wilaya_code = ?').get(wilayaCode);
   const fallback = getSetting(db, 'default_company_id');
+  let companyId = null;
+  if (storeId) {
+    companyId = db.prepare('SELECT company_id FROM store_routes WHERE store_id = ? AND wilaya_code = ?')
+      .get(storeId, wilayaCode)?.company_id
+      ?? db.prepare('SELECT company_id FROM stores WHERE id = ?').get(storeId)?.company_id
+      ?? null;
+  }
   return {
-    company_id: route?.company_id ?? (fallback ? Number(fallback) : null),
+    company_id: companyId ?? route?.company_id ?? (fallback ? Number(fallback) : null),
     home_fee: route?.home_fee ?? 0,
     desk_fee: route?.desk_fee ?? 0,
   };
@@ -45,9 +55,10 @@ function moveStock(db, productId, orderId, quantity, reason) {
 
 export function getOrder(db, id) {
   const order = db.prepare(`
-    SELECT o.*, p.name AS product_name, c.name AS company_name, c.provider AS company_provider
+    SELECT o.*, p.name AS product_name, p.store_id, s.name AS store_name, c.name AS company_name, c.provider AS company_provider
     FROM orders o
     JOIN products p ON p.id = o.product_id
+    LEFT JOIN stores s ON s.id = p.store_id
     LEFT JOIN delivery_companies c ON c.id = o.company_id
     WHERE o.id = ?`).get(id);
   if (!order) throw new HttpError(404, 'Commande introuvable');
@@ -84,7 +95,7 @@ export function createOrder(db, input, { source = 'manual', userId = null } = {}
   if (!product || (source === 'landing' && !product.active)) throw new HttpError(404, 'المنتج غير موجود');
 
   const f = validateOrderFields(input);
-  const route = resolveRoute(db, f.wilaya_code);
+  const route = resolveRoute(db, f.wilaya_code, product.store_id);
   const unit_price = input.unit_price != null && source !== 'landing' ? Number(input.unit_price) : product.price;
   const delivery_fee = f.stop_desk ? route.desk_fee : route.home_fee;
   const total = unit_price * f.quantity + delivery_fee;
@@ -117,7 +128,7 @@ export function updateOrder(db, id, input, userId = null) {
   const order = getOrder(db, id);
   if (!EDITABLE.includes(order.status)) throw new HttpError(409, 'لا يمكن تعديل طلبية بعد إرسالها');
   const f = validateOrderFields({ ...order, ...input });
-  const route = resolveRoute(db, f.wilaya_code);
+  const route = resolveRoute(db, f.wilaya_code, order.store_id);
   const unit_price = input.unit_price != null ? Number(input.unit_price) : order.unit_price;
   const delivery_fee = input.delivery_fee != null
     ? Number(input.delivery_fee)
@@ -204,7 +215,7 @@ export function applyAction(db, id, action, { userId = null, note = null } = {})
 export async function dispatchOrder(db, id, { userId = null, tracking = null } = {}) {
   const order = getOrder(db, id);
   if (order.status !== 'confirmed') throw new HttpError(409, 'لازم الطلبية تكون مؤكدة');
-  const companyId = order.company_id ?? resolveRoute(db, order.wilaya_code).company_id;
+  const companyId = order.company_id ?? resolveRoute(db, order.wilaya_code, order.store_id).company_id;
   const company = companyId && db.prepare('SELECT * FROM delivery_companies WHERE id = ?').get(companyId);
   const fail = (msg) => {
     db.prepare(`UPDATE orders SET dispatch_error = ?, updated_at = datetime('now') WHERE id = ?`).run(msg, id);

@@ -37,10 +37,11 @@ export function apiRouter(db) {
   // ---- products ----
   r.get('/products', (req, res) => {
     res.json(db.prepare(`
-      SELECT p.*,
+      SELECT p.*, s.name AS store_name,
         (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id) AS orders_count,
         (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id AND o.status IN ('new','no_answer','postponed')) AS pending_count
-      FROM products p ORDER BY p.active DESC, p.id DESC`).all());
+      FROM products p LEFT JOIN stores s ON s.id = p.store_id
+      ORDER BY p.active DESC, p.id DESC`).all());
   });
 
   const productFields = (b) => ({
@@ -49,6 +50,7 @@ export function apiRouter(db) {
     price: Number(b.price) || 0,
     cost: Number(b.cost) || 0,
     landing_url: b.landing_url ? String(b.landing_url).trim() : null,
+    store_id: b.store_id ? Number(b.store_id) : null,
     active: b.active === false || b.active === 0 ? 0 : 1,
   });
 
@@ -58,9 +60,9 @@ export function apiRouter(db) {
     const stock = Math.floor(Number(req.body.stock) || 0);
     const id = tx(db, () => {
       const { lastInsertRowid } = db.prepare(`
-        INSERT INTO products (name, sku, price, cost, stock, landing_url, active, public_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.active, newKey());
+        INSERT INTO products (name, sku, price, cost, stock, landing_url, store_id, active, public_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.store_id, f.active, newKey());
       if (stock) {
         db.prepare(`INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, 'مخزون أولي')`)
           .run(lastInsertRowid, stock);
@@ -74,8 +76,8 @@ export function apiRouter(db) {
     const f = productFields(req.body);
     if (!f.name) throw new HttpError(400, 'اسم المنتج ضروري');
     const { changes } = db.prepare(`
-      UPDATE products SET name = ?, sku = ?, price = ?, cost = ?, landing_url = ?, active = ? WHERE id = ?`)
-      .run(f.name, f.sku, f.price, f.cost, f.landing_url, f.active, req.params.id);
+      UPDATE products SET name = ?, sku = ?, price = ?, cost = ?, landing_url = ?, store_id = ?, active = ? WHERE id = ?`)
+      .run(f.name, f.sku, f.price, f.cost, f.landing_url, f.store_id, f.active, req.params.id);
     if (!changes) throw new HttpError(404, 'المنتج غير موجود');
     res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
   });
@@ -113,6 +115,7 @@ export function apiRouter(db) {
       if (list.length) where.push(`o.status IN (${list.map(() => '?').join(',')})`), args.push(...list);
     }
     if (req.query.product_id) where.push('o.product_id = ?'), args.push(Number(req.query.product_id));
+    if (req.query.store_id) where.push('p.store_id = ?'), args.push(Number(req.query.store_id));
     if (req.query.wilaya) where.push('o.wilaya_code = ?'), args.push(Number(req.query.wilaya));
     if (req.query.company_id) where.push('o.company_id = ?'), args.push(Number(req.query.company_id));
     if (req.query.from) where.push('date(o.created_at) >= date(?)'), args.push(req.query.from);
@@ -127,11 +130,12 @@ export function apiRouter(db) {
     const offset = Math.max(0, Number(req.query.offset) || 0);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = db.prepare(`
-      SELECT o.*, p.name AS product_name, c.name AS company_name
+      SELECT o.*, p.name AS product_name, s.name AS store_name, c.name AS company_name
       FROM orders o JOIN products p ON p.id = o.product_id
+      LEFT JOIN stores s ON s.id = p.store_id
       LEFT JOIN delivery_companies c ON c.id = o.company_id
       ${whereSql} ORDER BY o.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
-    const { total } = db.prepare(`SELECT COUNT(*) AS total FROM orders o ${whereSql}`).get(...args);
+    const { total } = db.prepare(`SELECT COUNT(*) AS total FROM orders o JOIN products p ON p.id = o.product_id ${whereSql}`).get(...args);
     res.json({ rows, total });
   });
 
@@ -235,6 +239,48 @@ export function apiRouter(db) {
       if (default_company_id !== undefined) setSetting(db, 'default_company_id', default_company_id || null);
       if (auto_dispatch !== undefined) setSetting(db, 'auto_dispatch', auto_dispatch ? '1' : '0');
     });
+    res.json({ ok: true });
+  });
+
+  // ---- stores (boutiques) ----
+  r.get('/stores', (req, res) => {
+    const stores = db.prepare(`
+      SELECT s.*, c.name AS company_name,
+        (SELECT COUNT(*) FROM products p WHERE p.store_id = s.id) AS products_count
+      FROM stores s LEFT JOIN delivery_companies c ON c.id = s.company_id ORDER BY s.name`).all();
+    const routes = db.prepare(`
+      SELECT r.*, c.name AS company_name FROM store_routes r JOIN delivery_companies c ON c.id = r.company_id
+      ORDER BY r.wilaya_code`).all();
+    res.json(stores.map((s) => ({ ...s, routes: routes.filter((r) => r.store_id === s.id) })));
+  });
+
+  const saveStore = (id, b) => {
+    const name = String(b.name || '').trim();
+    if (!name) throw new HttpError(400, 'اسم البوتيك ضروري');
+    const companyId = b.company_id ? Number(b.company_id) : null;
+    return tx(db, () => {
+      try {
+        if (id) db.prepare('UPDATE stores SET name = ?, company_id = ? WHERE id = ?').run(name, companyId, id);
+        else id = Number(db.prepare('INSERT INTO stores (name, company_id) VALUES (?, ?)').run(name, companyId).lastInsertRowid);
+      } catch {
+        throw new HttpError(409, 'هاد الاسم مستعمل');
+      }
+      if (Array.isArray(b.routes)) {
+        db.prepare('DELETE FROM store_routes WHERE store_id = ?').run(id);
+        const insert = db.prepare('INSERT OR REPLACE INTO store_routes (store_id, wilaya_code, company_id) VALUES (?, ?, ?)');
+        for (const x of b.routes) {
+          const code = Number(x.wilaya_code);
+          if (isValidWilaya(code) && x.company_id) insert.run(id, code, Number(x.company_id));
+        }
+      }
+      return id;
+    });
+  };
+
+  r.post('/stores', requireAdmin, (req, res) => res.status(201).json({ id: saveStore(null, req.body) }));
+  r.put('/stores/:id', requireAdmin, (req, res) => res.json({ id: saveStore(Number(req.params.id), req.body) }));
+  r.delete('/stores/:id', requireAdmin, (req, res) => {
+    db.prepare('DELETE FROM stores WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
   });
 

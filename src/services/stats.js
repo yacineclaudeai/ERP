@@ -21,7 +21,7 @@ export function getStats(db, { from = null, to = null } = {}) {
   const closedShipments = n('delivered') + n('returned');
 
   const products = db.prepare(`
-    SELECT p.id, p.name, p.stock, p.cost,
+    SELECT p.id, p.name, p.stock, p.cost, p.store_id, s.name AS store_name,
       COUNT(o.id) AS orders,
       SUM(o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed,
       SUM(o.status = 'cancelled') AS cancelled,
@@ -29,7 +29,8 @@ export function getStats(db, { from = null, to = null } = {}) {
       SUM(o.status = 'returned') AS returned,
       SUM(CASE WHEN o.status = 'delivered' THEN o.unit_price * o.quantity ELSE 0 END) AS revenue,
       SUM(CASE WHEN o.status = 'delivered' THEN p.cost * o.quantity ELSE 0 END) AS cogs
-    FROM products p LEFT JOIN orders o ON o.product_id = p.id AND ${r.sql}
+    FROM products p LEFT JOIN stores s ON s.id = p.store_id
+    LEFT JOIN orders o ON o.product_id = p.id AND ${r.sql}
     GROUP BY p.id ORDER BY orders DESC`).all(...r.args);
 
   const ads = range('date', from, to);
@@ -73,6 +74,13 @@ export function getStats(db, { from = null, to = null } = {}) {
     { revenue: 0, cogs: 0, ad_spend: 0, profit: 0 },
   );
 
+  const byStore = Object.values(perProduct.reduce((acc, p) => {
+    const key = p.store_id ?? 0;
+    const s = (acc[key] ||= { store_id: p.store_id, store_name: p.store_name, orders: 0, delivered: 0, returned: 0, revenue: 0, ad_spend: 0, profit: 0 });
+    for (const k of ['orders', 'delivered', 'returned', 'revenue', 'ad_spend', 'profit']) s[k] += p[k];
+    return acc;
+  }, {}));
+
   return {
     by_status: byStatus,
     orders: Object.values(byStatus).reduce((a, b) => a + b, 0),
@@ -80,6 +88,7 @@ export function getStats(db, { from = null, to = null } = {}) {
     delivery_rate: pct(n('delivered'), closedShipments),
     ...totals,
     products: perProduct,
+    by_store: byStore,
     by_wilaya: byWilaya,
     daily,
     low_stock: db.prepare('SELECT id, name, stock FROM products WHERE active = 1 AND stock <= 5 ORDER BY stock').all(),
