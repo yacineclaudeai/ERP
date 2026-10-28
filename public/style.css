@@ -166,3 +166,5 @@ td.acts button.dark .ic { width: 13px; height: 13px; }
 .bulk { display: flex; gap: 8px; align-items: center; background: #fef3c7; border-radius: 10px; padding: 8px 12px; margin-bottom: 8px; }
 .bulk.hidden { display: none; }
 .bulk select { width: auto; }
+.top-scroll { overflow-x: auto; overflow-y: hidden; height: 14px; margin-bottom: 4px; }
+.top-scroll > div { height: 1px; }

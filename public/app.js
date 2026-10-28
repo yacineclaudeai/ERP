@@ -297,7 +297,8 @@ async function ordersPage() {
         <option value="confirm">مؤكدة</option><option value="no_answer">ما ردش</option>
         <option value="postpone">مؤجلة</option><option value="cancel">ملغاة</option></select>
       <button class="btn small" id="bulk-go">تطبيق</button></div>
-    <div class="table-wrap"><table class="orders">
+    <div class="top-scroll" id="top-scroll"><div></div></div>
+    <div class="table-wrap orders-wrap" id="orders-wrap"><table class="orders">
       <thead><tr>
         <th><input type="checkbox" id="check-all"></th>
         ${hfilter('المصدر', 'source', Object.entries(SOURCE_LABELS))}
@@ -321,6 +322,7 @@ async function ordersPage() {
         <span class="page-n">${page} / ${pages}</span>
         ${page < pages ? `<button class="btn small" data-page="${page + 1}">التالية ›</button>` : ''}</span></div>`);
   bindOrderTable(main.querySelector('table.orders'), list.rows, products, companies, stores);
+  syncTopScroll(main.querySelector('#top-scroll'), main.querySelector('#orders-wrap'));
 
   main.querySelectorAll('[data-status]').forEach((b) => (b.onclick = () => go({ status: b.dataset.status })));
   main.querySelectorAll('[data-filter]').forEach((s) => (s.onchange = () => go({ [s.dataset.filter]: s.value })));
@@ -372,6 +374,25 @@ async function ordersPage() {
     toast(`تم ${ok} من ${ids.length}${errors.length ? ` · ${errors[0]}` : ''}`, Boolean(errors.length));
     router();
   });
+}
+
+// A second horizontal scrollbar above the table, kept in step with the one below.
+function syncTopScroll(top, wrap) {
+  const fit = () => {
+    top.firstElementChild.style.width = `${wrap.scrollWidth}px`;
+    top.classList.toggle('hidden', wrap.scrollWidth <= wrap.clientWidth);
+  };
+  let busy = false;
+  const mirror = (from, to) => () => {
+    if (busy) return;
+    busy = true;
+    to.scrollLeft = from.scrollLeft;
+    requestAnimationFrame(() => (busy = false));
+  };
+  top.onscroll = mirror(top, wrap);
+  wrap.onscroll = mirror(wrap, top);
+  fit();
+  new ResizeObserver(fit).observe(wrap);
 }
 
 const EDITABLE = ['new', 'no_answer', 'postponed', 'confirmed'];
