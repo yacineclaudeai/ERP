@@ -311,3 +311,17 @@ export async function rerouteProductOrders(db, productId) {
   }
   return orders.length;
 }
+
+// Removes an order that never reached a delivery company; held stock goes back.
+export async function deleteOrder(db, id) {
+  return db.tx(async (t) => {
+    const order = await getOrder(t, id, { lock: true });
+    if (['dispatched', 'delivered', 'returned'].includes(order.status)) throw new HttpError(409, 'ما تنجمش تحذف طلبية تبعثت');
+    if (order.stock_reserved) await moveStock(t, order.product_id, null, order.quantity, `حذف الطلبية ${order.reference}`);
+    await t.run('DELETE FROM order_events WHERE order_id = ?', id);
+    await t.run('UPDATE stock_movements SET order_id = NULL WHERE order_id = ?', id);
+    await t.run('UPDATE orders SET duplicate_of = NULL WHERE duplicate_of = ?', id);
+    await t.run('DELETE FROM orders WHERE id = ?', id);
+    return { ok: true };
+  });
+}

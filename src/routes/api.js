@@ -6,7 +6,7 @@ import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
 import {
   STATUSES, HttpError, getOrder, createOrder, updateOrder, applyAction,
-  confirmAndDispatch, dispatchOrder, syncTracking, rerouteProductOrders,
+  confirmAndDispatch, dispatchOrder, syncTracking, rerouteProductOrders, deleteOrder,
 } from '../services/orders.js';
 import { getStats, localDay } from '../services/stats.js';
 import {
@@ -175,6 +175,8 @@ export function apiRouter(db) {
     if (Number(q.store_id)) where.push('p.store_id = ?'), args.push(Number(q.store_id));
     if (Number(q.wilaya)) where.push('o.wilaya_code = ?'), args.push(Number(q.wilaya));
     if (Number(q.company_id)) where.push('o.company_id = ?'), args.push(Number(q.company_id));
+    if (q.source) where.push('o.source = ?'), args.push(String(q.source));
+    if (q.stop_desk === '0' || q.stop_desk === '1') where.push('o.stop_desk = ?'), args.push(q.stop_desk === '1');
     const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
     if (isDate(q.from)) where.push(`${localDay('o.created_at')} >= ?::date`), args.push(q.from);
     if (isDate(q.to)) where.push(`${localDay('o.created_at')} <= ?::date`), args.push(q.to);
@@ -208,6 +210,8 @@ export function apiRouter(db) {
   });
 
   r.post('/orders', async (c) => c.json(await createOrder(db, body(c), { source: 'manual', userId: c.get('user').id }), 201));
+
+  r.delete('/orders/:id', requireAdmin, async (c) => c.json(await deleteOrder(db, idParam(c))));
 
   r.put('/orders/:id', async (c) => c.json(await updateOrder(db, idParam(c), body(c), c.get('user').id)));
 

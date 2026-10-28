@@ -349,3 +349,17 @@ test('real company names, the user product list, and each store ships with its o
   await api('PUT', `/api/products/${p.id}/store`, { company_id: dhd.id });
   assert.equal((await api('GET', '/api/products')).body.find((x) => x.id === p.id).company_name, 'DHD Delivery');
 });
+
+test('orders list filters by source and delivery type; admins delete unsent orders', async () => {
+  const p = (await api('POST', '/api/products', { name: 'Filtre', price: 1000, stock: 3 })).body;
+  const home = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'H', phone: '0551110001', wilaya_code: 16 })).body;
+  const desk = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'D', phone: '0551110002', wilaya_code: 16, stop_desk: true })).body;
+  const ids = (qs) => api('GET', `/api/orders?product_id=${p.id}&${qs}`).then((r) => r.body.rows.map((o) => o.id));
+  assert.deepEqual(await ids('stop_desk=1'), [desk.id]);
+  assert.deepEqual(await ids('source=manual&stop_desk=0'), [home.id]);
+  assert.deepEqual(await ids('source=landing'), []);
+
+  await api('POST', `/api/orders/${home.id}/action`, { action: 'cancel' });
+  assert.equal((await api('DELETE', `/api/orders/${home.id}`)).status, 200);
+  assert.equal((await api('GET', `/api/orders/${home.id}`)).status, 404);
+});
