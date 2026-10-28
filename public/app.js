@@ -926,7 +926,7 @@ async function storesPage() {
   const [stores, companies] = await Promise.all([api('GET', '/stores'), api('GET', '/delivery/companies')]);
   const main = shell(`
     <h2>البوتيكات</h2>
-    <p class="muted">كل بوتيك عندها شركة توصيل، وعندها حسابها الخاص (التوكن) عند كل شركة تخدم معاها. المنتجات تتربط بالبوتيك والشركة من صفحة "المنتجات".</p>
+    <p class="muted">كل بوتيك عندها شركة توصيل، وعندها حسابها الخاص (التوكن) عند كل شركة تخدم معاها. باش تزيد توكن لبوتيك كاينة اضغط "تعديل" قدامها (ماشي "+ بوتيك"). المنتجات تتربط بالبوتيك والشركة من صفحة "المنتجات".</p>
     <div class="bar"><button class="btn primary" id="add">+ بوتيك</button></div>
     <div class="table-wrap"><table>
       <tr><th>البوتيك</th><th>شركة التوصيل</th><th>الحسابات (التوكن)</th><th>استثناءات حسب الولاية</th><th>منتجات</th><th></th></tr>

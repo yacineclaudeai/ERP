@@ -12,7 +12,7 @@ import { getStats, localDay } from '../services/stats.js';
 import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
-import { scanStore, applyStoreLinks } from '../services/branches.js';
+import { scanStore, applyStoreLinks, normalizeName } from '../services/branches.js';
 import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet } from '../services/sheets.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
@@ -324,6 +324,12 @@ export function apiRouter(db) {
     if (!name) throw new HttpError(400, 'اسم البوتيك ضروري');
     const companyId = b.company_id ? Number(b.company_id) : null;
     return db.tx(async (t) => {
+      // A token for an existing store goes on that store (تعديل), not on a new
+      // one: a new "YACINE packers" store would hold the token with no products.
+      const key = normalizeName(name);
+      const clash = (await t.all('SELECT id, name FROM stores WHERE id <> ?', id || 0))
+        .find((s) => { const n = normalizeName(s.name); return n === key || (!id && n && ` ${key} `.includes(` ${n} `)); });
+      if (clash) throw new HttpError(409, `البوتيك ${clash.name} كاينة: باش تزيد التوكن اضغط "تعديل" قدامها`);
       if (id) {
         const { changes } = await t.run('UPDATE stores SET name = ?, company_id = ? WHERE id = ?', name, companyId, id);
         if (!changes) throw new HttpError(404, 'البوتيك ما كانش');

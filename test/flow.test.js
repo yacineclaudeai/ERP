@@ -363,3 +363,12 @@ test('orders list filters by source and delivery type; admins delete unsent orde
   assert.equal((await api('DELETE', `/api/orders/${home.id}`)).status, 200);
   assert.equal((await api('GET', `/api/orders/${home.id}`)).status, 404);
 });
+
+test('a token for an existing store is not saved on a new look-alike store', async () => {
+  for (const name of ['yacine', 'YACINE Packers']) {
+    const r = await api('POST', '/api/stores', { name });
+    assert.equal(r.status, 409);
+    assert.match(r.body.error, /YACINE/);
+  }
+  assert.equal((await api('POST', '/api/stores', { name: 'Nouvelle boutique' })).status, 201);
+});

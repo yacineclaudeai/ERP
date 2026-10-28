@@ -82,7 +82,7 @@ test('csv, sheet links, wilayas and column guessing', () => {
 });
 
 test('LightFunnels sheet: new rows come in once, products are matched or created', async () => {
-  const store = (await api('POST', '/api/stores', { name: 'yacine boutique' })).body;
+  const store = (await api('POST', '/api/stores', { name: 'Boutique Test Sheets' })).body;
   const watch = (await api('POST', '/api/products', { name: 'Montre Luxe', price: 3000, stock: 4, store_id: store.id })).body;
   const url = 'https://docs.google.com/spreadsheets/d/real-sheet/edit#gid=0';
 
