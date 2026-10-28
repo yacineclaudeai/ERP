@@ -462,6 +462,7 @@ function productForm(p, stores) {
         ${p ? '' : '<label>المخزون الأولي<input name="stock" type="number" value="0"></label>'}
         <label>البوتيك<select name="store_id"><option value="">—</option>${stores
           .map((s) => `<option value="${s.id}" ${s.id === x.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+        <label>بودجي الحملة في النهار<input name="ad_daily_budget" type="number" step="0.5" value="${x.ad_daily_budget ?? ''}" placeholder="فارغ = 9"></label>
       </div>
       <label>رابط صفحة الهبوط<input name="landing_url" value="${esc(x.landing_url)}" placeholder="https://..." dir="ltr"></label>
       <label class="check"><input type="checkbox" name="active" ${x.active ? 'checked' : ''}> مفعل (يستقبل طلبيات)</label>

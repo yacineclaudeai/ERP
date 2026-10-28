@@ -150,6 +150,8 @@ export function openDb(file = process.env.DB_PATH || './data/erp.db') {
   // Columns added after v1: CREATE TABLE IF NOT EXISTS does not add them to existing databases.
   const storeCols = db.prepare('PRAGMA table_info(stores)').all().map((c) => c.name);
   if (!storeCols.includes('ad_account_id')) db.exec('ALTER TABLE stores ADD COLUMN ad_account_id TEXT');
+  const productCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+  if (!productCols.includes('ad_daily_budget')) db.exec('ALTER TABLE products ADD COLUMN ad_daily_budget REAL');
   return db;
 }
 

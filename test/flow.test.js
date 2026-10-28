@@ -169,7 +169,11 @@ test('ad plan launches in-stock products and pauses sold-out campaigns', async (
   const noPage = await mk('NoPage', 40, '');
 
   let plan = (await api('GET', '/api/ads/plan')).body;
-  assert.equal(plan.to_launch.length, 0, 'nothing launches before a budget is set');
+  assert.equal(plan.to_launch.find((p) => p.id === ready.id).daily_budget, 9, 'default budget is 9');
+  await api('PUT', `/api/products/${ready.id}`, { name: 'Ready', price: 3000, landing_url: 'https://shop.dz/p', store_id: store.id, ad_daily_budget: 15 });
+  plan = (await api('GET', '/api/ads/plan')).body;
+  assert.equal(plan.to_launch.find((p) => p.id === ready.id).daily_budget, 15, 'product budget wins');
+  await api('PUT', `/api/products/${ready.id}`, { name: 'Ready', price: 3000, landing_url: 'https://shop.dz/p', store_id: store.id, ad_daily_budget: 0 });
 
   await api('PUT', '/api/ads/settings', { daily_budget: 2000, max_total_daily_budget: 3000, min_stock: 20 });
   plan = (await api('GET', '/api/ads/plan')).body;

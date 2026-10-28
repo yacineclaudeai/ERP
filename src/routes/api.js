@@ -55,6 +55,7 @@ export function apiRouter(db) {
     landing_url: b.landing_url ? String(b.landing_url).trim() : null,
     store_id: b.store_id ? Number(b.store_id) : null,
     active: b.active === false || b.active === 0 ? 0 : 1,
+    ad_daily_budget: Number(b.ad_daily_budget) > 0 ? Number(b.ad_daily_budget) : null,
   });
 
   r.post('/products', requireAdmin, (req, res) => {
@@ -63,9 +64,9 @@ export function apiRouter(db) {
     const stock = Math.floor(Number(req.body.stock) || 0);
     const id = tx(db, () => {
       const { lastInsertRowid } = db.prepare(`
-        INSERT INTO products (name, sku, price, cost, stock, landing_url, store_id, active, public_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.store_id, f.active, newKey());
+        INSERT INTO products (name, sku, price, cost, stock, landing_url, store_id, active, ad_daily_budget, public_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(f.name, f.sku, f.price, f.cost, stock, f.landing_url, f.store_id, f.active, f.ad_daily_budget, newKey());
       if (stock) {
         db.prepare(`INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, 'مخزون أولي')`)
           .run(lastInsertRowid, stock);
@@ -82,6 +83,10 @@ export function apiRouter(db) {
       UPDATE products SET name = ?, sku = ?, price = ?, cost = ?, landing_url = ?, store_id = ?, active = ? WHERE id = ?`)
       .run(f.name, f.sku, f.price, f.cost, f.landing_url, f.store_id, f.active, req.params.id);
     if (!changes) throw new HttpError(404, 'المنتج غير موجود');
+    // Only touch the ad budget when the caller sends it, so older forms do not wipe it.
+    if (req.body.ad_daily_budget !== undefined) {
+      db.prepare('UPDATE products SET ad_daily_budget = ? WHERE id = ?').run(f.ad_daily_budget, req.params.id);
+    }
     res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
   });
 
