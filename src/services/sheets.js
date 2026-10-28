@@ -214,7 +214,7 @@ export async function importSheet(db, source, { rows = null } = {}) {
       const order = rowToOrder(get, source.kind);
       const productId = await productFor(db, source, get('product_name') || get('sku'), get('sku'), order.unit_price);
       const created = await createOrder(db, { ...order, product_id: productId }, {
-        source: 'sheet', sheet: { source_id: source.id, external_id: externalId, name: source.name },
+        source: source.kind === 'abandoned' ? 'abandoned' : 'sheet', sheet: { source_id: source.id, external_id: externalId, name: source.name },
       });
       if (order.created_at) await db.run('UPDATE orders SET created_at = ? WHERE id = ?', order.created_at, created.id);
       result.imported++;

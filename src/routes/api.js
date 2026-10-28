@@ -157,7 +157,9 @@ export function apiRouter(db) {
     const offset = Math.max(0, Number(q.offset) || 0);
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = await db.all(`
-      SELECT o.*, p.name AS product_name, s.name AS store_name, c.name AS company_name
+      SELECT o.*, p.name AS product_name, s.name AS store_name, c.name AS company_name,
+        (SELECT u.username FROM order_events e JOIN users u ON u.id = e.user_id
+          WHERE e.order_id = o.id AND e.type = 'confirmed' ORDER BY e.id DESC LIMIT 1) AS confirmed_by
       FROM orders o JOIN products p ON p.id = o.product_id
       LEFT JOIN stores s ON s.id = p.store_id
       LEFT JOIN delivery_companies c ON c.id = o.company_id
@@ -325,7 +327,7 @@ export function apiRouter(db) {
     if (!name || !sheetUrl) throw new HttpError(400, 'الاسم والرابط ضروريين');
     const mapping = Object.fromEntries(Object.entries(b.mapping || {})
       .filter(([f, h]) => SHEET_FIELDS[f] && h).map(([f, h]) => [f, String(h)]));
-    return [name, sheetUrl, b.store_id ? Number(b.store_id) : null, b.kind === 'fake' ? 'fake' : 'real',
+    return [name, sheetUrl, b.store_id ? Number(b.store_id) : null, ['fake', 'abandoned'].includes(b.kind) ? b.kind : 'real',
       JSON.stringify(mapping), Math.max(2, Math.floor(Number(b.start_row)) || 2), b.active !== false && b.active !== 'false'];
   };
   r.post('/sheets', requireAdmin, async (c) => {

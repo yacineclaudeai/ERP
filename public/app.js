@@ -9,6 +9,10 @@ const EVENT_LABELS = {
   cancelled: 'تلغات', reopened: 'تعاودت تفتحت', dispatched: 'تبعثت للتوصيل', dispatch_failed: 'فشل الإرسال',
   delivered: 'تستلمت', returned: 'روتور', edited: 'تعدلت',
 };
+const SOURCE_LABELS = { landing: 'صفحة الهبوط', sheet: 'شيت', abandoned: 'متروكة', manual: 'يدوي' };
+const SOURCE_ICONS = { landing: '🌐', sheet: '📗', abandoned: '🛒', manual: '✍️' };
+// wa.me wants the number in international form, without the leading 0.
+const whatsapp = (phone) => `https://wa.me/213${String(phone).replace(/^0/, '')}`;
 const PROVIDER_LABELS = { ecotrack: 'Ecotrack (API)', sandbox: 'تجربة (بدون API)', manual: 'يدوي (بدون API)' };
 
 const state = { user: null, meta: null };
@@ -280,17 +284,32 @@ async function ordersPage() {
       ${state.user.role === 'admin' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
     </form>
     <div class="muted" style="margin-bottom:8px">${list.total} طلبية</div>
-    <div class="table-wrap"><table>
-      <tr><th>المرجع</th><th>التاريخ</th><th>الزبون</th><th>الهاتف</th><th>الولاية</th><th>المنتج</th><th>المجموع</th><th>الحالة</th><th>التوصيل</th></tr>
-      ${list.rows.map((o) => `<tr class="click" data-id="${o.id}">
-        <td>${esc(o.reference)}${o.duplicate_of ? ' <span class="badge warn">مكررة؟</span>' : ''}</td>
-        <td class="muted">${esc(fmtDate(o.created_at))}</td>
-        <td>${esc(o.customer_name)}</td><td dir="ltr">${esc(o.phone)}</td><td>${wilaya(o.wilaya_code)}</td>
-        <td>${esc(o.product_name)} × ${o.quantity}${o.store_name ? ` <span class="muted">${esc(o.store_name)}</span>` : ''}</td><td class="num">${money(o.total)}</td>
-        <td>${badge(o.status)}${o.call_attempts ? ` <span class="muted">(${o.call_attempts})</span>` : ''}
-          ${o.dispatch_error ? ' <span class="badge cancelled" title="' + esc(o.dispatch_error) + '">خطأ إرسال</span>' : ''}</td>
+    <div class="table-wrap"><table class="orders">
+      <tr><th></th><th>رقم الطلبية</th><th>التاريخ</th><th>الاسم الكامل</th><th>الهاتف</th><th>محاولات</th><th>الحالة</th>
+        <th>البوتيك</th><th>التوصيل</th><th>الولاية / البلدية</th><th>المنتج</th><th>الكمية</th><th>سعر المنتج</th>
+        <th>سعر التوصيل</th><th>المجموع</th><th>التفاصيل</th><th>التأكيد بواسطة</th><th>شركة التوصيل</th></tr>
+      ${list.rows.map((o) => `<tr class="click ${o.source === 'abandoned' ? 'abandoned' : ''}" data-id="${o.id}">
+        <td title="${SOURCE_LABELS[o.source] || o.source}">${SOURCE_ICONS[o.source] || ''}</td>
+        <td>${esc(o.external_id && !o.external_id.startsWith('row-') ? o.external_id : o.reference)}
+          ${o.source === 'abandoned' ? '<span class="badge warn">متروكة</span>' : ''}${o.duplicate_of ? ' <span class="badge warn">مكررة؟</span>' : ''}</td>
+        <td class="muted nowrap">${esc(fmtDate(o.created_at))}</td>
+        <td>${esc(o.customer_name)}</td>
+        <td dir="ltr" class="nowrap">${esc(o.phone)} <a href="${whatsapp(o.phone)}" target="_blank" rel="noopener" data-stop title="WhatsApp">💬</a></td>
+        <td class="num">${o.call_attempts || 0}</td>
+        <td>${badge(o.status)}${o.dispatch_error ? ' <span class="badge cancelled" title="' + esc(o.dispatch_error) + '">خطأ إرسال</span>' : ''}</td>
+        <td class="muted">${esc(o.store_name || '')}</td>
+        <td>${o.stop_desk ? 'مكتب' : 'المنزل'}</td>
+        <td>${wilaya(o.wilaya_code)}<div class="muted">${esc(o.commune || '')}</div></td>
+        <td>${esc(o.product_name)}</td>
+        <td class="num">${o.quantity}</td>
+        <td class="num">${money(o.unit_price)}</td>
+        <td class="num">${money(o.delivery_fee)}</td>
+        <td class="num"><b>${money(o.total)}</b></td>
+        <td class="muted details">${esc(o.notes || '')}</td>
+        <td class="muted">${esc(o.confirmed_by || '')}</td>
         <td class="muted">${esc(o.company_name || '')} ${esc(o.tracking || '')}</td></tr>`).join('')}
     </table></div>`);
+  main.querySelectorAll('[data-stop]').forEach((a) => (a.onclick = (e) => e.stopPropagation()));
 
   main.querySelectorAll('[data-status]').forEach((b) => (b.onclick = () => go({ status: b.dataset.status })));
   main.querySelector('#filters').onsubmit = (e) => {
@@ -319,13 +338,13 @@ async function openOrder(id) {
     ${o.duplicate_of ? `<div class="alert">طلبية مكررة محتملة (نفس الرقم ونفس المنتج، #${o.duplicate_of})</div>` : ''}
     <div class="grid2">
       <div><div class="muted">الزبون</div>${esc(o.customer_name)}</div>
-      <div><div class="muted">الهاتف</div><a href="tel:${esc(o.phone)}" dir="ltr">${esc(o.phone)}</a>${o.phone2 ? ` / <a href="tel:${esc(o.phone2)}" dir="ltr">${esc(o.phone2)}</a>` : ''}</div>
+      <div><div class="muted">الهاتف</div><a href="tel:${esc(o.phone)}" dir="ltr">${esc(o.phone)}</a> <a href="${whatsapp(o.phone)}" target="_blank" rel="noopener">💬 WhatsApp</a>${o.phone2 ? ` / <a href="tel:${esc(o.phone2)}" dir="ltr">${esc(o.phone2)}</a>` : ''}</div>
       <div><div class="muted">الولاية / البلدية</div>${wilaya(o.wilaya_code)} / ${esc(o.commune || '—')}</div>
       <div><div class="muted">العنوان</div>${esc(o.address || '—')} ${o.stop_desk ? '<span class="badge">مكتب</span>' : ''}</div>
       <div><div class="muted">المنتج</div>${esc(o.product_name)} × ${o.quantity}${o.store_name ? ` <span class="muted">(${esc(o.store_name)})</span>` : ''}</div>
       <div><div class="muted">المجموع</div>${money(o.unit_price * o.quantity)} + توصيل ${money(o.delivery_fee)} = <b>${money(o.total)}</b></div>
       <div><div class="muted">شركة التوصيل</div>${esc(o.company_name || 'غير محددة')} ${esc(o.tracking || '')}</div>
-      <div><div class="muted">المصدر</div>${o.source === 'landing' ? 'صفحة الهبوط' : 'يدوي'} ${o.utm_campaign ? `· ${esc(o.utm_campaign)}` : ''}</div>
+      <div><div class="muted">المصدر</div>${SOURCE_LABELS[o.source] || o.source} ${o.utm_campaign ? `· ${esc(o.utm_campaign)}` : ''}</div>
     </div>
     ${o.notes ? `<p><span class="muted">ملاحظة:</span> ${esc(o.notes)}</p>` : ''}
     <hr>
@@ -705,13 +724,13 @@ async function sheetsPage() {
   const [sheets, stores] = await Promise.all([api('GET', '/sheets'), api('GET', '/stores')]);
   const main = shell(`
     <h2>الشيتات</h2>
-    <p class="muted">الطلبيات تدخل وحدها من Google Sheets (كيما LightFunnels) كل 5 دقايق. الشيت لازم يكون مشارك: Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur. الطلبيات اللي تجي من شيت وهمي تدخل بحالة "وهمية" وما تتبعثش للتوصيل.</p>
+    <p class="muted">الطلبيات تدخل وحدها من Google Sheets (كيما LightFunnels) كل 5 دقايق. الشيت لازم يكون مشارك: Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur. الطلبيات المتروكة (Abandoned) تدخل للتأكيد بعلامة "متروكة"، والطلبيات من شيت وهمي تدخل بحالة "وهمية" وما تتبعثش للتوصيل.</p>
     <div class="bar"><button class="btn primary" id="add">+ شيت</button></div>
     <div class="table-wrap"><table>
       <tr><th>الشيت</th><th>البوتيك</th><th>النوع</th><th>دخلو</th><th>آخر مرة</th><th>أخطاء</th><th></th></tr>
       ${sheets.map((g) => `<tr><td>${esc(g.name)}${g.active ? '' : ' <span class="badge">متوقف</span>'}</td>
         <td>${esc(g.store_name || '—')}</td>
-        <td>${g.kind === 'fake' ? badge('fake') : 'حقيقية'}</td>
+        <td>${g.kind === 'fake' ? badge('fake') : g.kind === 'abandoned' ? '<span class="badge warn">متروكة</span>' : 'حقيقية'}</td>
         <td class="num">${g.imported_count}</td>
         <td class="muted">${fmtDate(g.last_sync_at) || '—'}<br>السطر ${g.last_row || g.start_row - 1}</td>
         <td class="muted" style="white-space:pre-line;color:var(--danger)">${esc(g.last_error || '')}</td>
@@ -738,7 +757,8 @@ function sheetForm(sheet, stores) {
         <label>البوتيك<select name="store_id"><option value="">—</option>${stores.map((s) =>
           `<option value="${s.id}" ${s.id === x.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
         <label>النوع<select name="kind"><option value="real">طلبيات حقيقية</option>
-          <option value="fake" ${x.kind === 'fake' ? 'selected' : ''}>طلبيات وهمية</option></select></label>
+          <option value="abandoned" ${x.kind === 'abandoned' ? 'selected' : ''}>طلبيات متروكة (Abandoned): تروح للتأكيد</option>
+          <option value="fake" ${x.kind === 'fake' ? 'selected' : ''}>طلبيات وهمية: للإحصائيات برك</option></select></label>
         <label>الحالة<select name="active"><option value="true">يخدم</option>
           <option value="false" ${x.active ? '' : 'selected'}>متوقف</option></select></label>
       </div>

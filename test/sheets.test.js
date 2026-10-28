@@ -169,7 +169,7 @@ test('a sheet without the required columns reports what is missing', async () =>
   assert.match((await api('GET', '/api/sheets')).body.find((g) => g.id === id).last_error, /أعمدة ناقصة/);
 });
 
-test('abandoned checkouts: same "Order ID" text on every row, LightFunnels date and variant kept', async () => {
+test('abandoned checkouts: go to confirmation, same "Order ID" text on every row, date and variant kept', async () => {
   sheets['abandoned'] = toCsv([LF_HEADERS,
     ['Client Un ', '550101010', '', 'Algeria', 'Ras El Oued', 'Pyjama 3 pcs love', 1, '', 'PYjAMA7COULEURS',
       'Abandoned checkout', 1900, '', 1900, '2026-06-26 20:03:08', '', '', 'Bordj Bou Arreridj', 'Ras El Oued', 'Pyjama 3 pcs love TAILLE:36/S'],
@@ -179,12 +179,14 @@ test('abandoned checkouts: same "Order ID" text on every row, LightFunnels date 
   ]);
   const url = 'https://docs.google.com/spreadsheets/d/abandoned/edit';
   const preview = (await api('POST', '/api/sheets/preview', { sheet_url: url })).body;
-  const { id } = (await api('POST', '/api/sheets', { name: 'abandoned', sheet_url: url, kind: 'fake', mapping: preview.mapping, start_row: 2 })).body;
+  const { id } = (await api('POST', '/api/sheets', { name: 'abandoned', sheet_url: url, kind: 'abandoned', mapping: preview.mapping, start_row: 2 })).body;
   const r = (await api('POST', `/api/sheets/${id}/sync`)).body;
   assert.equal(r.imported, 2);
   assert.equal(r.errors.length, 1);
-  const rows = (await api('GET', '/api/orders?status=fake&q=Client Deux')).body.rows;
+  // Abandoned checkouts go to the confirmation team, tagged.
+  const rows = (await api('GET', '/api/orders?status=new&q=Client Deux')).body.rows;
   assert.equal(rows.length, 1);
+  assert.equal(rows[0].source, 'abandoned');
   assert.equal(rows[0].wilaya_code, 26);
   assert.equal(rows[0].phone, '0770202020');
   assert.equal(rows[0].notes, 'Pyjama 4 pcs taille:M/38');

@@ -101,3 +101,8 @@ pre.code { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8p
   .main { padding: 12px; }
   .grid2, .grid3 { grid-template-columns: 1fr; }
 }
+
+table.orders td { font-size: 13px; }
+table.orders td.details { max-width: 220px; white-space: normal; }
+table.orders tr.abandoned { background: #fff7ed; }
+.nowrap { white-space: nowrap; }
