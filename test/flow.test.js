@@ -384,3 +384,50 @@ test('changing a store company moves its confirmed orders to the new company', a
   await api('PUT', `/api/stores/${store.id}`, { name: 'Boutique Switch', company_id: b.id });
   assert.equal((await api('GET', `/api/orders/${o.id}`)).body.company_id, b.id);
 });
+
+test('a confirmed or sent order goes back to confirmation; a sent parcel is removed at the company first', async () => {
+  const eco = (await api('POST', '/api/delivery/companies', {
+    name: 'Eco Back', provider: 'ecotrack', base_url: 'https://back.ecotrack.dz', api_token: 'T-BACK',
+  })).body;
+  const p = (await api('POST', '/api/products', { name: 'Back item', price: 1000, stock: 5, company_id: eco.id })).body;
+  const stock = async () => (await api('GET', '/api/products')).body.find((x) => x.id === p.id).stock;
+
+  const realFetch = globalThis.fetch;
+  const calls = [];
+  let refuse = false;
+  globalThis.fetch = async (url, init) => {
+    const u = new URL(String(url));
+    if (!u.hostname.endsWith('ecotrack.dz')) return realFetch(url, init);
+    calls.push(`${init.method} ${u.pathname} ${u.searchParams.get('tracking') || ''}`.trim());
+    if (refuse) return new Response(JSON.stringify({ success: false, message: 'colis déjà ramassé' }), { status: 422 });
+    return new Response(JSON.stringify({ success: true, tracking: 'BK-1' }), { status: 200 });
+  };
+  try {
+    const o = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'B', phone: '0551117777', wilaya_code: 16 })).body;
+    const sent = (await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' })).body;
+    assert.equal(sent.status, 'dispatched');
+    assert.equal(await stock(), 4);
+
+    refuse = true;
+    const no = await api('POST', `/api/orders/${o.id}/back`, {});
+    assert.equal(no.status, 409);
+    assert.match(no.body.error, /ramassé/);
+    assert.equal((await api('GET', `/api/orders/${o.id}`)).body.status, 'dispatched');
+
+    refuse = false;
+    const back = (await api('POST', `/api/orders/${o.id}/back`, {})).body;
+    assert.deepEqual([back.status, back.tracking, back.stock_reserved], ['new', null, false]);
+    assert.equal(await stock(), 5);
+    assert.ok(calls.includes('DELETE /api/v1/delete/order BK-1'));
+
+    // Confirmed but not sent (auto send off): back without calling the company.
+    await api('PUT', '/api/delivery/routes', { auto_dispatch: false });
+    await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' });
+    const n = calls.length;
+    assert.equal((await api('POST', `/api/orders/${o.id}/back`, {})).body.status, 'new');
+    assert.equal(calls.length, n);
+  } finally {
+    globalThis.fetch = realFetch;
+    await api('PUT', '/api/delivery/routes', { auto_dispatch: true });
+  }
+});

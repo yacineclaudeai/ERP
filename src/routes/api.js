@@ -6,7 +6,7 @@ import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
 import {
   STATUSES, HttpError, getOrder, createOrder, updateOrder, applyAction,
-  confirmAndDispatch, dispatchOrder, syncTracking, rerouteProductOrders, deleteOrder,
+  confirmAndDispatch, dispatchOrder, backToConfirmation, syncTracking, rerouteProductOrders, deleteOrder,
 } from '../services/orders.js';
 import { getStats, localDay } from '../services/stats.js';
 import {
@@ -222,6 +222,15 @@ export function apiRouter(db) {
     return c.json(b.action === 'confirm'
       ? await confirmAndDispatch(db, id, opts)
       : await applyAction(db, id, String(b.action), opts));
+  });
+
+  r.post('/orders/:id/back', async (c) => {
+    const id = idParam(c);
+    // Removing a parcel at the delivery company is for admins only.
+    if ((await getOrder(db, id)).status === 'dispatched' && c.get('user').role !== 'admin') {
+      throw new HttpError(403, 'غير المدير يرجّع طلبية راهي عند التوصيل');
+    }
+    return c.json(await backToConfirmation(db, id, { userId: c.get('user').id }));
   });
 
   // Retry a failed dispatch, or record a tracking number by hand.

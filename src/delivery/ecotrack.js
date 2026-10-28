@@ -28,7 +28,7 @@ async function call(company, method, endpoint, params, timeout = 20_000) {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(timeout),
   };
-  if (method === 'GET') {
+  if (method === 'GET' || method === 'DELETE') {
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   } else {
     init.headers['Content-Type'] = 'application/json';
@@ -76,6 +76,11 @@ export const ecotrack = {
       parcels: rows.map((r) => ({ tracking: r.tracking, products: r.products ?? r.produit ?? '' })),
       last_page: Number(data.last_page || data.meta?.last_page || 1),
     };
+  },
+
+  // Removes a parcel the company has not picked up yet; Ecotrack refuses later ones.
+  async cancelShipment(company, tracking) {
+    await call(company, 'DELETE', 'delete/order', { tracking });
   },
 
   async getStatus(company, tracking) {

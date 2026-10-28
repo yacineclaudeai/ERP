@@ -272,6 +272,38 @@ export async function dispatchOrder(db, id, { userId = null, tracking = null } =
   return getOrder(db, id);
 }
 
+// Back to the confirmation page as a new order, to fix a wrong confirmation or
+// a parcel sent to the wrong company. A sent parcel is first removed at the
+// company; if the company refuses (already picked up), nothing changes here.
+export async function backToConfirmation(db, id, { userId = null } = {}) {
+  const order = await getOrder(db, id);
+  if (!['confirmed', 'dispatched'].includes(order.status)) throw new HttpError(409, 'غير المؤكدة ولا اللي عند التوصيل ترجع للتأكيد');
+  let note = 'رجعت للتأكيد';
+  if (order.status === 'dispatched' && order.tracking) {
+    const company = order.company_id && await companyAccount(db, order.company_id, order.store_id);
+    const provider = company && getProvider(company.provider);
+    if (provider?.cancelShipment) {
+      try {
+        await provider.cancelShipment(company, order.tracking);
+      } catch (err) {
+        throw new HttpError(409, `${company.name} ما قبلتش تحذف الطرد ${order.tracking}: ${err.message}`);
+      }
+      note = `رجعت للتأكيد، والطرد ${order.tracking} تحذف عند ${company.name}`;
+    } else {
+      note = `رجعت للتأكيد. الطرد ${order.tracking} لازم يتحذف باليد عند ${company?.name || 'شركة التوصيل'}`;
+    }
+  }
+  return db.tx(async (t) => {
+    const current = await getOrder(t, id, { lock: true });
+    if (current.status !== order.status) throw new HttpError(409, 'الطلبية تبدلت، عاود حاول');
+    if (current.stock_reserved) await moveStock(t, current.product_id, id, current.quantity, 'رجوع للتأكيد');
+    await t.run(`UPDATE orders SET status = 'new', stock_reserved = false, tracking = NULL, dispatch_error = NULL,
+      confirmed_at = NULL, dispatched_at = NULL, call_attempts = 0, updated_at = now() WHERE id = ?`, id);
+    await logEvent(t, id, 'reopened', note, userId);
+    return getOrder(t, id);
+  });
+}
+
 export async function confirmAndDispatch(db, id, opts = {}) {
   const order = await applyAction(db, id, 'confirm', opts);
   if (await getSetting(db, 'auto_dispatch') === '0') return order;

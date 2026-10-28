@@ -85,7 +85,8 @@ const guard = (fn) => async (...args) => {
 // ---------- layout & routing ----------
 const NAV = [
   ['#/', 'لوحة التحكم'],
-  ['#/orders', 'الطلبيات'],
+  ['#/orders', 'تأكيد الطلبيات'],
+  ['#/tracking', 'تتبع الطلبيات'],
   ['#/products', 'المنتجات'],
   ['#/stores', 'البوتيكات', 'admin'],
   ['#/sheets', 'الشيتات', 'admin'],
@@ -118,7 +119,8 @@ function shell(content) {
 
 const ROUTES = {
   '#/': dashboardPage,
-  '#/orders': ordersPage,
+  '#/orders': () => ordersPage('confirm'),
+  '#/tracking': () => ordersPage('tracking'),
   '#/products': productsPage,
   '#/stores': storesPage,
   '#/sheets': sheetsPage,
@@ -197,7 +199,7 @@ async function dashboardPage() {
     </div>
     <div class="card">
       <div class="tabs">${Object.keys(STATUS_LABELS).map((k) =>
-        `<a class="tab" href="#/orders?status=${k}">${STATUS_LABELS[k]} <span class="n">${s.by_status[k] || 0}</span></a>`).join('')}</div>
+        `<a class="tab" href="${orderPageOf(k)}?status=${k}">${STATUS_LABELS[k]} <span class="n">${s.by_status[k] || 0}</span></a>`).join('')}</div>
       <div class="muted">الطلبيات في آخر 30 يوم</div>
       <div class="bars">${s.daily.map((d) =>
         `<div style="height:${(d.orders / max) * 100}%" title="${d.day}: ${d.orders} / مؤكدة ${d.confirmed}"><span>${d.orders}</span></div>`).join('')}</div>
@@ -249,10 +251,20 @@ async function dashboardPage() {
 const PAGE_SIZE = 50;
 const ORDER_FILTERS = ['status', 'q', 'product_id', 'store_id', 'wilaya', 'company_id', 'source', 'stop_desk', 'page'];
 
-async function ordersPage() {
+// Two pages on the same table: confirmation (orders still to call) and
+// tracking (confirmed orders, at the delivery company, delivered, returned).
+const ORDER_PAGES = {
+  confirm: { hash: '#/orders', title: 'تأكيد الطلبيات', statuses: ['new', 'no_answer', 'postponed', 'cancelled', 'fake'], first: 'new,no_answer,postponed' },
+  tracking: { hash: '#/tracking', title: 'تتبع الطلبيات', statuses: ['confirmed', 'dispatched', 'delivered', 'returned'] },
+};
+ORDER_PAGES.tracking.first = ORDER_PAGES.tracking.statuses.join(',');
+const orderPageOf = (status) => (ORDER_PAGES.tracking.statuses.includes(status) ? '#/tracking' : '#/orders');
+
+async function ordersPage(mode = 'confirm') {
+  const P = ORDER_PAGES[mode];
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   const f = Object.fromEntries(ORDER_FILTERS.map((k) => [k, params.get(k) ?? '']));
-  if (!params.has('status')) f.status = 'new,no_answer,postponed';
+  if (!params.has('status') || !f.status) f.status = P.first;
   const page = Math.max(1, Number(f.page) || 1);
   const query = Object.fromEntries(Object.entries({ ...f, page: '' }).filter(([, v]) => v !== ''));
   const [list, products, stats, stores, companies] = await Promise.all([
@@ -262,15 +274,12 @@ async function ordersPage() {
     api('GET', '/stores'),
     api('GET', '/delivery/companies'),
   ]);
-  const tabs = [
-    ['new,no_answer,postponed', 'للتأكيد', ['new', 'no_answer', 'postponed']],
-    ...Object.keys(STATUS_LABELS).map((k) => [k, STATUS_LABELS[k], [k]]),
-    ['', 'الكل', Object.keys(STATUS_LABELS)],
-  ];
+  const tabs = mode === 'confirm'
+    ? [[P.first, 'للتأكيد', P.first.split(',')], ...P.statuses.map((k) => [k, STATUS_LABELS[k], [k]]), [P.statuses.join(','), 'الكل', P.statuses]]
+    : [[P.first, 'الكل', P.statuses], ...P.statuses.map((k) => [k, STATUS_LABELS[k], [k]])];
   const go = (patch) => {
     const p = new URLSearchParams(Object.entries({ ...f, page: '', ...patch }).filter(([, v]) => v !== ''));
-    if (!p.has('status')) p.set('status', '');
-    location.hash = `#/orders?${p}`;
+    location.hash = `${P.hash}?${p}`;
   };
   // A header with a dropdown filter, like Ecotrack's column headers.
   const hfilter = (label, key, options) => `<th class="hf"><select data-filter="${key}" class="${f[key] ? 'on' : ''}">
@@ -281,7 +290,7 @@ async function ordersPage() {
   const pages = Math.max(1, Math.ceil(list.total / PAGE_SIZE));
 
   const main = shell(`
-    <h2>الطلبيات</h2>
+    <h2>${P.title}</h2>
     <div class="tabs">${tabs.map(([key, label, keys]) =>
       `<button class="tab ${key === f.status ? 'active' : ''}" data-status="${key}">${label}
         <span class="n">${keys.reduce((a, k) => a + (stats.by_status[k] || 0), 0)}</span></button>`).join('')}</div>
@@ -289,8 +298,8 @@ async function ordersPage() {
       <input class="grow" name="q" placeholder="بحث: الاسم، الهاتف، رقم الطلبية، التراكينغ" value="${esc(f.q)}">
       <button class="btn">بحث</button>
       ${ORDER_FILTERS.some((k) => !['status', 'page'].includes(k) && f[k]) ? '<button class="btn" type="button" id="clear">مسح الفلاتر</button>' : ''}
-      <button class="btn primary" type="button" id="new-order">+ طلبية يدوية</button>
-      ${isAdmin ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
+      ${mode === 'confirm' ? '<button class="btn primary" type="button" id="new-order">+ طلبية يدوية</button>' : ''}
+      ${isAdmin && mode === 'tracking' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
     </form>
     <div class="bulk hidden" id="bulk"><b id="bulk-n"></b>
       <select id="bulk-action"><option value="">تبديل الحالة للمحددين…</option>
@@ -303,7 +312,7 @@ async function ordersPage() {
         <th><input type="checkbox" id="check-all"></th>
         ${hfilter('المصدر', 'source', Object.entries(SOURCE_LABELS))}
         <th>رقم الطلبية</th><th>التاريخ</th><th>الاسم الكامل</th><th>الهاتف</th><th>اتصال</th>
-        ${hfilter('الحالة', 'status', Object.entries(STATUS_LABELS))}
+        ${hfilter('الحالة', 'status', P.statuses.map((k) => [k, STATUS_LABELS[k]]))}
         <th>العنوان</th>
         ${hfilter('البوتيك', 'store_id', stores.map((s) => [s.id, s.name]))}
         ${hfilter('نوع التوصيل', 'stop_desk', [['0', 'المنزل'], ['1', 'مكتب']])}
@@ -333,7 +342,8 @@ async function ordersPage() {
   };
   const clear = main.querySelector('#clear');
   if (clear) clear.onclick = () => go(Object.fromEntries(ORDER_FILTERS.filter((k) => k !== 'status').map((k) => [k, ''])));
-  main.querySelector('#new-order').onclick = () => orderForm(null, products);
+  const add = main.querySelector('#new-order');
+  if (add) add.onclick = () => orderForm(null, products);
   const sync = main.querySelector('#sync');
   if (sync) {
     sync.onclick = guard(async () => {
@@ -483,6 +493,8 @@ function orderRow(o, products, companies, stores) {
       <button data-open title="السجل">${icon('clock')}</button>
       ${o.status === 'confirmed' ? `<button data-dispatch title="إرسال لشركة التوصيل" class="dark">${icon('send')}</button>` : ''}
       ${edit ? `<button data-edit title="تعديل كامل">${icon('edit', 'green')}</button>` : ''}
+      ${o.status === 'confirmed' || (o.status === 'dispatched' && state.user.role === 'admin')
+        ? `<button data-back title="رجّعها لتأكيد الطلبيات${o.status === 'dispatched' ? ' (الطرد يتحذف عند شركة التوصيل)' : ''}">${icon('truck', 'red')}</button>` : ''}
       ${o.tracking ? `<button data-open title="التراكينغ: ${esc(o.tracking)}">${icon('truck', 'green')}</button>` : ''}
     </td></tr>`;
 }
@@ -549,6 +561,18 @@ function bindOrderTable(table, rows, products, companies, stores) {
     if (e.target.closest('[data-attempt]')) return save(tr, () => api('POST', `/orders/${id}/action`, { action: 'no_answer' }));
     if (e.target.closest('[data-edit]')) return orderForm(byId.get(id), products);
     if (e.target.closest('[data-dispatch]')) return save(tr, () => api('POST', `/orders/${id}/dispatch`, {}));
+    if (e.target.closest('[data-back]')) {
+      const o = byId.get(id);
+      const ask = o.status === 'dispatched'
+        ? `الطرد ${o.tracking || ''} يتحذف عند ${o.company_name || 'شركة التوصيل'} والطلبية ترجع لتأكيد الطلبيات. نكمل؟`
+        : 'الطلبية ترجع لتأكيد الطلبيات (جديدة) والستوك يرجع. نكمل؟';
+      if (!confirm(ask)) return;
+      return guard(async () => {
+        await api('POST', `/orders/${id}/back`, {});
+        tr.remove();
+        toast('رجعت لتأكيد الطلبيات');
+      })();
+    }
     if (e.target.closest('[data-open]')) return openOrder(id);
     if (e.target.closest('[data-delete]')) {
       if (!confirm('حذف الطلبية نهائياً؟')) return;
