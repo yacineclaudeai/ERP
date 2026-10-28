@@ -20,6 +20,10 @@ async function api(method, path, body, { auth = true } = {}) {
 }
 
 before(async () => {
+  // The build runs with the real admin account in the environment; tests use their own.
+  process.env.ADMIN_USERNAME = 'admin';
+  process.env.ADMIN_PASSWORD = 'admin123';
+  delete process.env.AUTOMATION_TOKEN;
   db = await openLocalDb();
   const app = createApp(db);
   server = await new Promise((resolve) => {
