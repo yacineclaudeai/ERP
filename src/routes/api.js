@@ -366,7 +366,12 @@ export function apiRouter(db) {
   };
 
   r.post('/stores', requireAdmin, async (c) => c.json({ id: await saveStore(null, body(c)) }, 201));
-  r.put('/stores/:id', requireAdmin, async (c) => c.json({ id: await saveStore(idParam(c), body(c)) }));
+  r.put('/stores/:id', requireAdmin, async (c) => {
+    const id = await saveStore(idParam(c), body(c));
+    // A store that changed company takes its unsent orders along.
+    for (const p of await db.all('SELECT id FROM products WHERE store_id = ?', id)) await rerouteProductOrders(db, p.id);
+    return c.json({ id });
+  });
   r.delete('/stores/:id', requireAdmin, async (c) => {
     await db.run('DELETE FROM stores WHERE id = ?', idParam(c));
     return c.json({ ok: true });

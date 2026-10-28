@@ -372,3 +372,15 @@ test('a token for an existing store is not saved on a new look-alike store', asy
   }
   assert.equal((await api('POST', '/api/stores', { name: 'Nouvelle boutique' })).status, 201);
 });
+
+test('changing a store company moves its confirmed orders to the new company', async () => {
+  const companies = (await api('GET', '/api/delivery/companies')).body;
+  const [a, b] = companies;
+  const store = (await api('POST', '/api/stores', { name: 'Boutique Switch', company_id: a.id })).body;
+  const p = (await api('POST', '/api/products', { name: 'Switch item', price: 1000, stock: 3, store_id: store.id })).body;
+  await api('PUT', `/api/products/${p.id}/store`, { store_id: store.id });
+  const o = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'S', phone: '0551110009', wilaya_code: 16 })).body;
+  assert.equal((await api('GET', `/api/orders/${o.id}`)).body.company_id, a.id);
+  await api('PUT', `/api/stores/${store.id}`, { name: 'Boutique Switch', company_id: b.id });
+  assert.equal((await api('GET', `/api/orders/${o.id}`)).body.company_id, b.id);
+});
