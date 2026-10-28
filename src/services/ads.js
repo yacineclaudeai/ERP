@@ -4,7 +4,7 @@ import { HttpError } from './orders.js';
 // Rules the launch routine follows. Budgets are in the ad account currency (EUR or USD on Meta, not DZD).
 const DEFAULTS = {
   mode: 'approval', // approval: build the campaign as a draft and wait for a yes; auto: go live directly
-  min_stock: 20, // launch only when at least this many units are in stock
+  min_stock: 7, // launch only when at least this many units are in stock
   pause_below: 5, // pause a running campaign when stock drops under this
   daily_budget: 9, // budget of each new campaign unless the product sets ad_daily_budget
   max_total_daily_budget: 0, // cap on the sum of running campaigns; 0 = no cap
@@ -42,7 +42,7 @@ export function saveAdSettings(db, body) {
 export function getAdPlan(db) {
   const s = getAdSettings(db);
   const products = db.prepare(`
-    SELECT p.id, p.name, p.sku, p.price, p.stock, p.landing_url, p.active, p.ad_daily_budget,
+    SELECT p.id, p.name, p.sku, p.price, p.stock, p.landing_url, p.active, p.ad_daily_budget, p.ad_creative_folder,
       s.name AS store_name, COALESCE(NULLIF(s.ad_account_id, ''), ?) AS ad_account_id,
       (SELECT COUNT(*) FROM orders o WHERE o.product_id = p.id
         AND o.created_at >= datetime('now', '-7 days')) AS orders_7d
@@ -63,6 +63,7 @@ export function getAdPlan(db) {
     const budget = p.ad_daily_budget > 0 ? p.ad_daily_budget : s.daily_budget;
     const item = { ...p, days_of_stock: p.orders_7d ? Math.round((p.stock / (p.orders_7d / 7)) * 10) / 10 : null };
     if (!p.landing_url) skipped.push({ ...item, reason: 'ما عندوش لاندينغ بيج' });
+    else if (!p.ad_creative_folder) skipped.push({ ...item, reason: 'ما عندوش دوسي كرياتيف في الدرايف' });
     else if (!p.ad_account_id) skipped.push({ ...item, reason: 'ما كانش حساب إعلاني للبوتيك' });
     else if (!(budget > 0)) skipped.push({ ...item, reason: 'البودجي اليومي ما تحددش' });
     else if (cap > 0 && budgetUsed + budget > cap) skipped.push({ ...item, reason: 'فات السقف اليومي' });

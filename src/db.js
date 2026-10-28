@@ -152,6 +152,7 @@ export function openDb(file = process.env.DB_PATH || './data/erp.db') {
   if (!storeCols.includes('ad_account_id')) db.exec('ALTER TABLE stores ADD COLUMN ad_account_id TEXT');
   const productCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
   if (!productCols.includes('ad_daily_budget')) db.exec('ALTER TABLE products ADD COLUMN ad_daily_budget REAL');
+  if (!productCols.includes('ad_creative_folder')) db.exec('ALTER TABLE products ADD COLUMN ad_creative_folder TEXT');
   return db;
 }
 

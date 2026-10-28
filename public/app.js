@@ -465,6 +465,7 @@ function productForm(p, stores) {
         <label>بودجي الحملة في النهار<input name="ad_daily_budget" type="number" step="0.5" value="${x.ad_daily_budget ?? ''}" placeholder="فارغ = 9"></label>
       </div>
       <label>رابط صفحة الهبوط<input name="landing_url" value="${esc(x.landing_url)}" placeholder="https://..." dir="ltr"></label>
+      <label>دوسي الكرياتيف في الدرايف (فيديوهات femme و homme)<input name="ad_creative_folder" value="${esc(x.ad_creative_folder)}" placeholder="https://drive.google.com/drive/folders/..." dir="ltr"></label>
       <label class="check"><input type="checkbox" name="active" ${x.active ? 'checked' : ''}> مفعل (يستقبل طلبيات)</label>
       <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إلغاء</button></div>
     </form>`);

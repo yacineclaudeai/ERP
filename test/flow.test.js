@@ -163,7 +163,7 @@ test('a store ships through its own account, with per-wilaya exceptions', async 
 test('ad plan launches in-stock products and pauses sold-out campaigns', async () => {
   const store = (await api('POST', '/api/stores', { name: 'ADS', ad_account_id: 'act_111' })).body;
   const mk = async (name, stock, landing_url = 'https://shop.dz/p') =>
-    (await api('POST', '/api/products', { name, price: 3000, stock, landing_url, store_id: store.id })).body;
+    (await api('POST', '/api/products', { name, price: 3000, stock, landing_url, store_id: store.id, ad_creative_folder: 'https://drive.google.com/drive/folders/x' })).body;
   const ready = await mk('Ready', 50);
   const low = await mk('Low', 3);
   const noPage = await mk('NoPage', 40, '');
