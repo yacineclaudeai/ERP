@@ -52,8 +52,21 @@ export function clearSession(res) {
   res.clearCookie(COOKIE);
 }
 
+// The campaign-launch routine has no browser session: it sends AUTOMATION_TOKEN as a bearer token,
+// which only opens the /ads routes.
+function isAutomation(req) {
+  const token = process.env.AUTOMATION_TOKEN;
+  const given = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!token || !given || !req.path.startsWith('/ads/')) return false;
+  return given.length === token.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(token));
+}
+
 export function authMiddleware(db) {
   return (req, res, next) => {
+    if (isAutomation(req)) {
+      req.user = { id: null, username: 'automation', role: 'admin' };
+      return next();
+    }
     const session = unsign(readCookie(req, COOKIE));
     const user = session && db.prepare('SELECT id, username, role FROM users WHERE id = ?').get(session.uid);
     if (!user) return res.status(401).json({ error: 'غير مسجل' });

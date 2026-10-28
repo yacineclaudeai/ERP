@@ -126,6 +126,20 @@ CREATE TABLE IF NOT EXISTS ad_spend (
   amount REAL NOT NULL,
   UNIQUE (product_id, date)
 );
+
+-- Meta Ads campaigns launched for a product, so they can be paused when stock runs out.
+CREATE TABLE IF NOT EXISTS ad_campaigns (
+  id INTEGER PRIMARY KEY,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  ad_account_id TEXT,
+  meta_campaign_id TEXT,
+  daily_budget REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'paused', 'stopped')),
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ad_campaigns_product ON ad_campaigns(product_id);
 `;
 
 export function openDb(file = process.env.DB_PATH || './data/erp.db') {
@@ -133,6 +147,9 @@ export function openDb(file = process.env.DB_PATH || './data/erp.db') {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // Columns added after v1: CREATE TABLE IF NOT EXISTS does not add them to existing databases.
+  const storeCols = db.prepare('PRAGMA table_info(stores)').all().map((c) => c.name);
+  if (!storeCols.includes('ad_account_id')) db.exec('ALTER TABLE stores ADD COLUMN ad_account_id TEXT');
   return db;
 }
 

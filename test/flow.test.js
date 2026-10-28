@@ -159,3 +159,45 @@ test('a store ships through its own account, with per-wilaya exceptions', async 
   const stats = (await api('GET', '/api/stats')).body;
   assert.equal(stats.by_store.find((s) => s.store_name === 'YACINE').orders, 2);
 });
+
+test('ad plan launches in-stock products and pauses sold-out campaigns', async () => {
+  const store = (await api('POST', '/api/stores', { name: 'ADS', ad_account_id: 'act_111' })).body;
+  const mk = async (name, stock, landing_url = 'https://shop.dz/p') =>
+    (await api('POST', '/api/products', { name, price: 3000, stock, landing_url, store_id: store.id })).body;
+  const ready = await mk('Ready', 50);
+  const low = await mk('Low', 3);
+  const noPage = await mk('NoPage', 40, '');
+
+  let plan = (await api('GET', '/api/ads/plan')).body;
+  assert.equal(plan.to_launch.length, 0, 'nothing launches before a budget is set');
+
+  await api('PUT', '/api/ads/settings', { daily_budget: 2000, max_total_daily_budget: 3000, min_stock: 20 });
+  plan = (await api('GET', '/api/ads/plan')).body;
+  const launchIds = plan.to_launch.map((p) => p.id);
+  assert.ok(launchIds.includes(ready.id));
+  assert.ok(!launchIds.includes(low.id));
+  assert.equal(plan.to_launch.find((p) => p.id === ready.id).ad_account_id, '111');
+  assert.equal(plan.skipped.find((p) => p.id === noPage.id).reason, 'ما عندوش لاندينغ بيج');
+
+  const c = (await api('POST', '/api/ads/campaigns', { product_id: ready.id, meta_campaign_id: '999', daily_budget: 2000, status: 'active' })).body;
+  assert.equal((await api('POST', '/api/ads/campaigns', { product_id: ready.id, status: 'draft' })).status, 409);
+  plan = (await api('GET', '/api/ads/plan')).body;
+  assert.ok(!plan.to_launch.some((p) => p.id === ready.id));
+
+  await api('POST', `/api/products/${ready.id}/stock`, { quantity: -48, reason: 'test' });
+  plan = (await api('GET', '/api/ads/plan')).body;
+  assert.equal(plan.to_pause[0].id, c.id);
+  assert.equal((await api('PATCH', `/api/ads/campaigns/${c.id}`, { status: 'paused' })).body.status, 'paused');
+});
+
+test('automation token opens only the ads routes', async () => {
+  process.env.AUTOMATION_TOKEN = 'robot-token-123';
+  const call = (path) => fetch(base + path, { headers: { Authorization: 'Bearer robot-token-123' } });
+  try {
+    assert.equal((await call('/api/ads/plan')).status, 200);
+    assert.equal((await call('/api/orders')).status, 401);
+    assert.equal((await fetch(base + '/api/ads/plan', { headers: { Authorization: 'Bearer nope' } })).status, 401);
+  } finally {
+    delete process.env.AUTOMATION_TOKEN;
+  }
+});

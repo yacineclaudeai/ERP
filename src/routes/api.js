@@ -9,6 +9,9 @@ import {
   confirmAndDispatch, dispatchOrder, syncTracking,
 } from '../services/orders.js';
 import { getStats } from '../services/stats.js';
+import {
+  getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
+} from '../services/ads.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
 
@@ -265,6 +268,10 @@ export function apiRouter(db) {
       } catch {
         throw new HttpError(409, 'هاد الاسم مستعمل');
       }
+      if (b.ad_account_id !== undefined) {
+        const account = String(b.ad_account_id || '').replace(/^act_/, '').trim() || null;
+        db.prepare('UPDATE stores SET ad_account_id = ? WHERE id = ?').run(account, id);
+      }
       if (Array.isArray(b.routes)) {
         db.prepare('DELETE FROM store_routes WHERE store_id = ?').run(id);
         const insert = db.prepare('INSERT OR REPLACE INTO store_routes (store_id, wilaya_code, company_id) VALUES (?, ?, ?)');
@@ -305,6 +312,14 @@ export function apiRouter(db) {
     db.prepare('DELETE FROM ad_spend WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
   });
+
+  // ---- ad campaigns (read and written by the launch routine with AUTOMATION_TOKEN) ----
+  r.get('/ads/settings', (req, res) => res.json(getAdSettings(db)));
+  r.put('/ads/settings', requireAdmin, (req, res) => res.json(saveAdSettings(db, req.body)));
+  r.get('/ads/plan', (req, res) => res.json(getAdPlan(db)));
+  r.get('/ads/campaigns', (req, res) => res.json(listAdCampaigns(db)));
+  r.post('/ads/campaigns', requireAdmin, (req, res) => res.status(201).json(recordAdCampaign(db, req.body)));
+  r.patch('/ads/campaigns/:id', requireAdmin, (req, res) => res.json(updateAdCampaign(db, Number(req.params.id), req.body)));
 
   // ---- stats ----
   r.get('/stats', (req, res) => {
