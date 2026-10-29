@@ -204,7 +204,6 @@ async function dashboardPage() {
       <div class="bars">${s.daily.map((d) =>
         `<div style="height:${(d.orders / max) * 100}%" title="${d.day}: ${d.orders} / مؤكدة ${d.confirmed}"><span>${d.orders}</span></div>`).join('')}</div>
     </div>
-    ${s.low_stock.length ? `<div class="alert">مخزون ناقص: ${s.low_stock.map((p) => `${esc(p.name)} (${p.stock})`).join('، ')}</div>` : ''}
     <h3>الفايدة لكل منتج</h3>
     <div class="table-wrap"><table>
       <tr><th>المنتج</th><th>طلبيات</th><th>تأكيد</th><th>مستلمة</th><th>روتور</th><th>نسبة التوصيل</th>
