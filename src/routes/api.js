@@ -9,6 +9,7 @@ import {
   confirmAndDispatch, dispatchOrder, backToConfirmation, syncTracking, rerouteProductOrders, deleteOrder,
 } from '../services/orders.js';
 import { getStats, localDay } from '../services/stats.js';
+import { getAccounting, saveDefaults, saveProductCosts, addExpense, deleteExpense } from '../services/accounting.js';
 import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
@@ -465,6 +466,22 @@ export function apiRouter(db) {
     const { from, to } = c.req.query();
     const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
     return c.json(await getStats(db, { from: isDate(from) ? from : null, to: isDate(to) ? to : null }));
+  });
+
+  // ---- accounting (profit of each product) ----
+  r.get('/accounting', requireAdmin, async (c) => c.json(await getAccounting(db)));
+  r.put('/accounting/defaults', requireAdmin, async (c) => c.json(await saveDefaults(db, body(c))));
+  r.put('/accounting/products/:id', requireAdmin, async (c) => {
+    await saveProductCosts(db, idParam(c), body(c));
+    return c.json({ ok: true });
+  });
+  r.post('/accounting/products/:id/expenses', requireAdmin, async (c) => {
+    await addExpense(db, idParam(c), body(c));
+    return c.json({ ok: true }, 201);
+  });
+  r.delete('/accounting/expenses/:id', requireAdmin, async (c) => {
+    await deleteExpense(db, idParam(c));
+    return c.json({ ok: true });
   });
 
   // ---- users ----

@@ -441,3 +441,52 @@ test('LightFunnels products missing from the ERP were added, existing ones left 
   assert.equal(existing.price, 0);
   assert.equal(products.filter((p) => p.name === 'Pyjama stitch cute').length, 1);
 });
+
+test('product accounting: sales minus every expense, auto, default and manual lines', async () => {
+  const sb = (await api('POST', '/api/delivery/companies', { name: 'Compta Express', provider: 'sandbox' })).body;
+  await api('PUT', '/api/delivery/routes', { default_company_id: sb.id, routes: [] });
+  const p = (await api('POST', '/api/products', { name: 'Compta item', price: 500, cost: 100, stock: 10 })).body;
+  const mk = async (quantity, phone) => (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'C', phone, wilaya_code: 16, quantity })).body;
+  const [a, b, c] = [await mk(2, '0551110101'), await mk(1, '0551110102'), await mk(1, '0551110103')];
+  for (const o of [a, b, c]) assert.equal((await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' })).body.status, 'dispatched');
+  await api('POST', `/api/orders/${a.id}/action`, { action: 'delivered' });
+  await api('POST', `/api/orders/${b.id}/action`, { action: 'returned' });
+
+  const row = async () => (await api('GET', '/api/accounting')).body.products.find((x) => x.id === p.id);
+  const line = (r, key) => r.lines.find((l) => l.key === key);
+
+  // Nothing priced yet: only the purchase counts, and the missing prices are listed.
+  let r = await row();
+  assert.equal(r.revenue, 1000);
+  assert.equal(line(r, 'purchase').amount, 1000);
+  assert.equal(line(r, 'purchase').qty, 10, 'batch = stock left + pieces out');
+  assert.ok(r.missing.includes('التأكيد'));
+  assert.equal(r.profit, 0);
+
+  await api('PUT', '/api/accounting/defaults', { packaging: 5, labels: 2, return_packaging: 10, confirmation: 50, tracking: 10, fx_rate: 250 });
+  r = await row();
+  assert.equal(line(r, 'packaging').amount, 20);
+  assert.equal(line(r, 'labels').amount, 8);
+  assert.equal(line(r, 'return_packaging').amount, 10);
+  assert.equal(line(r, 'confirmation').amount, 150, 'confirmed orders, the returned one included');
+  assert.equal(line(r, 'tracking').amount, 30);
+  assert.equal(r.expenses, 1218);
+  assert.equal(r.profit, -218);
+  assert.equal(r.state, 'selling');
+  assert.equal(r.stock, 7);
+
+  // Manual values: this product's own confirmation price, ads in dollars, an extra expense, sales stopped.
+  await api('PUT', `/api/accounting/products/${p.id}`, { confirmation: 40, ads_usd: 2, selling: false, transport_office: 300 });
+  await api('POST', `/api/accounting/products/${p.id}/expenses`, { name: 'Bache', amount: 100 });
+  r = await row();
+  assert.equal(line(r, 'confirmation').amount, 120);
+  assert.equal(line(r, 'confirmation').mode, 'manual');
+  assert.equal(line(r, 'ads').amount, 500);
+  assert.equal(line(r, 'transport_office').amount, 300);
+  assert.equal(r.expenses, 1000 + 20 + 8 + 10 + 120 + 30 + 500 + 300 + 100);
+  assert.equal(r.state, 'loss');
+  const expense = r.lines.find((l) => l.expense_id);
+  await api('DELETE', `/api/accounting/expenses/${expense.expense_id}`);
+  assert.equal((await row()).lines.some((l) => l.expense_id), false);
+  assert.equal((await api('PUT', `/api/accounting/products/${p.id}`, { packaging: -1 })).status, 400);
+});

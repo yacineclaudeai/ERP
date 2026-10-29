@@ -88,6 +88,7 @@ const NAV = [
   ['#/orders', 'تأكيد الطلبيات'],
   ['#/tracking', 'تتبع الطلبيات'],
   ['#/products', 'المنتجات'],
+  ['#/accounting', 'الفايدة لكل منتج', 'admin'],
   ['#/stores', 'البوتيكات', 'admin'],
   ['#/sheets', 'الشيتات', 'admin'],
   ['#/delivery', 'التوصيل', 'admin'],
@@ -122,6 +123,7 @@ const ROUTES = {
   '#/orders': () => ordersPage('confirm'),
   '#/tracking': () => ordersPage('tracking'),
   '#/products': productsPage,
+  '#/accounting': accountingPage,
   '#/stores': storesPage,
   '#/sheets': sheetsPage,
   '#/delivery': deliveryPage,
@@ -732,6 +734,114 @@ async function linkStoresDialog(stores) {
   r.linked.forEach((l) => log(`${esc(l.product)} ← ${esc(l.to)}${l.from ? ` <span class="muted">(كان ${esc(l.from)})</span>` : ''}${l.orders ? ` · ${l.orders} طلبية` : ''}`));
   if (r.unmatched.length) log(`<span class="neg">ما لقيناش الفرع تاع:</span> ${r.unmatched.map(esc).join('، ')}`);
   box.querySelector('[data-close]').onclick = () => { modal.close(); router(); };
+}
+
+// ---------- accounting: profit of each product ----------
+const MODE_LABELS = { auto: 'أوتوماتيكي', default: 'ثابت', manual: 'يدوي', empty: 'فارغ' };
+const STATE_LABELS = { profit: 'ربح', selling: 'قيد البيع', loss: 'خسارة', none: '—' };
+
+async function accountingPage() {
+  const a = await api('GET', '/accounting');
+  const unit = a.unit_fields;
+  const defaultFields = [...Object.entries(unit).map(([k, f]) => [k, `${f.label} (لكل ${f.per})`]), ['creative', 'الكرياتيف (للمنتج)'], ['fx_rate', 'سعر صرف الدولار']];
+  const main = shell(`
+    <h2>الفايدة لكل منتج</h2>
+    <p class="muted">الفايدة = المبيعات − كل المصاريف. الشراء يتحسب للدفعة كاملة، والستوك الباقي معلومة برك. كل سطر يكون <b>أوتوماتيكي</b> (من الطلبيات) ولا <b>ثابت</b> (سعر عام تحطو هنا) ولا <b>يدوي</b> (تكتبو للمنتج).</p>
+    <div class="kpis">
+      <div class="kpi"><div class="l">المبيعات</div><div class="v">${money(a.totals.revenue)}</div></div>
+      <div class="kpi"><div class="l">المصاريف</div><div class="v">${money(a.totals.expenses)}</div></div>
+      <div class="kpi"><div class="l">الفايدة</div><div class="v ${a.totals.profit < 0 ? 'neg' : 'pos'}">${money(a.totals.profit)}</div></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">القيم الثابتة (لكل المنتجات)</h3>
+      <form class="grid3" id="defaults">
+        ${defaultFields.map(([k, l]) => `<label>${esc(l)}<input name="${k}" type="number" step="any" min="0" value="${a.defaults[k] ?? ''}" placeholder="فارغ = ما حطيتوش"></label>`).join('')}
+        <div class="actions" style="align-self:end"><button class="btn primary">حفظ القيم الثابتة</button></div>
+      </form>
+    </div>
+    <div class="table-wrap"><table>
+      <tr><th>المنتج</th><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الوضعية</th><th>الستوك الباقي</th><th>ناقص</th><th></th></tr>
+      ${a.products.map((p) => `<tr>
+        <td>${esc(p.name)}</td><td>${esc(p.store_name || '—')}</td>
+        <td class="num">${money(p.revenue)}</td><td class="num">${money(p.expenses)}</td>
+        <td class="num ${p.profit < 0 ? 'neg' : 'pos'}">${money(p.profit)}</td>
+        <td>${p.state === 'none' ? '<span class="muted">—</span>' : `<span class="badge ${p.state === 'profit' ? 'delivered' : p.state === 'loss' ? 'cancelled' : 'warn'}">${STATE_LABELS[p.state]}</span>`}</td>
+        <td class="num">${p.stock}</td>
+        <td>${p.missing.length ? `<span class="badge warn" title="${esc(p.missing.join('، '))}">${p.missing.length}</span>` : '<span class="muted">—</span>'}</td>
+        <td><button class="btn small" data-card="${p.id}">البطاقة</button></td></tr>`).join('')}
+    </table></div>`);
+  main.querySelector('#defaults').onsubmit = guard(async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(defaultFields.map(([k]) => [k, e.target.elements[k].value]));
+    await api('PUT', '/accounting/defaults', body);
+    toast('تم الحفظ');
+    router();
+  });
+  main.querySelectorAll('[data-card]').forEach((b) => (b.onclick = () => accountingCard(a, a.products.find((p) => p.id === Number(b.dataset.card)))));
+}
+
+function accountingCard(a, p) {
+  const m = p.manual;
+  const field = (k, label, hint = '') => `<label>${esc(label)}<input name="${k}" type="number" step="any" min="0" value="${m[k] ?? ''}" placeholder="${esc(hint)}"></label>`;
+  const box = modal.open(`
+    <h3>${esc(p.name)} ${p.state === 'none' ? '' : `<span class="badge ${p.state === 'profit' ? 'delivered' : p.state === 'loss' ? 'cancelled' : 'warn'}">${STATE_LABELS[p.state]}</span>`}</h3>
+    <div class="table-wrap"><table>
+      <tr><td><b>المبيعات</b> <span class="muted">(${p.delivered_qty} قطعة متسلمة)</span></td><td class="num"><b>${money(p.revenue)}</b></td><td></td></tr>
+      ${p.lines.map((l) => `<tr><td>${esc(l.label)} ${l.note || l.qty != null ? `<span class="muted">${esc(l.note || `${l.qty} ${l.per || ''} × ${l.unit}`)}</span>` : ''}</td>
+        <td class="num">${money(l.amount)}</td>
+        <td><span class="badge ${l.mode === 'empty' ? 'warn' : ''}">${MODE_LABELS[l.mode]}</span>
+          ${l.expense_id ? `<button class="btn small danger" data-del-expense="${l.expense_id}">✕</button>` : ''}</td></tr>`).join('')}
+      <tr><td><b>مجموع المصاريف</b></td><td class="num"><b>${money(p.expenses)}</b></td><td></td></tr>
+      <tr><td><b>الفايدة</b></td><td class="num ${p.profit < 0 ? 'neg' : 'pos'}"><b>${money(p.profit)}</b></td><td></td></tr>
+    </table></div>
+    <p class="muted">القطع الباقية في الستوك: <b>${p.stock}</b> (معلومة برك، ما تتزادش في الفايدة).${p.missing.length ? ` ناقص: ${esc(p.missing.join('، '))}.` : ''}</p>
+    <form class="stack" id="costs">
+      <h4 style="margin:6px 0">قيم خاصة بهاد المنتج (فارغ = القيمة الثابتة ولا الأوتوماتيكية)</h4>
+      <div class="grid3">
+        ${Object.entries(a.unit_fields).map(([k, f]) => field(k, `${f.label} (لكل ${f.per})`, a.defaults[k] ?? '')).join('')}
+        ${Object.entries(a.lump_fields).map(([k, f]) => field(k, f.label, k === 'creative' ? (a.defaults.creative ?? '') : '')).join('')}
+        ${field('batch_qty', 'كمية الدفعة', `أوتوماتيكي: ${p.batch_auto}`)}
+        ${field('ads_usd', 'الأدس بالدولار', 'فارغ = من مصاريف الإشهار')}
+        ${field('fx_rate', 'سعر الصرف', a.defaults.fx_rate ?? '')}
+      </div>
+      <label class="check"><input type="checkbox" name="selling" ${p.selling ? 'checked' : ''}> المنتج مازال يتباع</label>
+      <label>ملاحظة<input name="notes" value="${esc(p.notes || '')}"></label>
+      <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إغلاق</button></div>
+    </form>
+    <form class="grid3" id="expense" style="margin-top:12px">
+      <label>مصروف آخر: الاسم<input name="name" required></label>
+      <label>المبلغ<input name="amount" type="number" step="any" min="0" required></label>
+      <div class="actions" style="align-self:end"><button class="btn">+ زيد</button></div>
+    </form>`);
+  const reopen = async () => {
+    const fresh = await api('GET', '/accounting');
+    modal.close();
+    accountingCard(fresh, fresh.products.find((x) => x.id === p.id));
+  };
+  const saveCosts = async () => {
+    const els = box.querySelector('#costs').elements;
+    const body = Object.fromEntries(Object.keys(m).map((k) => [k, els[k].value]));
+    body.selling = els.selling.checked;
+    body.notes = els.notes.value;
+    await api('PUT', `/accounting/products/${p.id}`, body);
+  };
+  box.querySelector('#costs').onsubmit = guard(async (e) => {
+    e.preventDefault();
+    await saveCosts();
+    toast('تم الحفظ');
+    await reopen();
+  });
+  box.querySelector('#expense').onsubmit = guard(async (e) => {
+    e.preventDefault();
+    await saveCosts();
+    await api('POST', `/accounting/products/${p.id}/expenses`, { name: e.target.elements.name.value, amount: e.target.elements.amount.value });
+    await reopen();
+  });
+  box.querySelectorAll('[data-del-expense]').forEach((b) => (b.onclick = guard(async () => {
+    await saveCosts();
+    await api('DELETE', `/accounting/expenses/${b.dataset.delExpense}`);
+    await reopen();
+  })));
 }
 
 // ---------- products ----------
