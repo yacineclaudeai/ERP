@@ -903,8 +903,17 @@ const STATE_LABELS = { profit: 'ربح', selling: 'قيد البيع', loss: 'خ
 
 async function accountingPage() {
   const [a, stores] = await Promise.all([api('GET', '/accounting'), api('GET', '/stores')]);
-  const storeId = new URLSearchParams(location.hash.split('?')[1] || '').get('store_id') || '';
-  const products = a.products.filter((p) => !storeId || String(p.store_id) === storeId);
+  const q = new URLSearchParams(location.hash.split('?')[1] || '');
+  const storeId = q.get('store_id') || '';
+  const picked = new Set((q.get('products') || '').split(',').filter(Boolean));
+  const inStore = a.products.filter((p) => !storeId || String(p.store_id) === storeId);
+  const products = picked.size ? inStore.filter((p) => picked.has(String(p.id))) : inStore;
+  const goTo = (store, ids) => {
+    const params = new URLSearchParams();
+    if (store) params.set('store_id', store);
+    if (ids.length) params.set('products', ids.join(','));
+    location.hash = `#/accounting${params.size ? `?${params}` : ''}`;
+  };
   const unit = a.unit_fields;
   const defaultFields = [...Object.entries(unit).map(([k, f]) => [k, `${f.label} (لكل ${f.per})`]), ['creative', 'الكرياتيف (للمنتج)'], ['fx_rate', 'سعر صرف الدولار']];
   // Totals of the products shown: profit, and the goods left with their purchase value.
@@ -920,9 +929,18 @@ async function accountingPage() {
   const main = shell(`
     <h2>الفايدة لكل منتج</h2>
     <div class="bar"><label>البوتيك<select id="acc-store"><option value="">كل البوتيكات</option>
-      ${stores.map((st) => `<option value="${st.id}" ${String(st.id) === storeId ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></label></div>
+      ${stores.map((st) => `<option value="${st.id}" ${String(st.id) === storeId ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></label>
+      <div class="multi"><span class="multi-label">المنتجات</span>
+        <details id="acc-products"><summary>${picked.size ? `${picked.size} منتج مختار` : 'كل المنتجات'}</summary>
+          <div class="multi-box">
+            <input type="search" id="acc-search" placeholder="ابحث على منتج…">
+            <div class="multi-list">${inStore.map((p) => `<label class="check" data-name="${esc(p.name.toLowerCase())}">
+              <input type="checkbox" value="${p.id}" ${picked.has(String(p.id)) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}</div>
+            <div class="actions"><button class="btn small primary" type="button" id="acc-apply">عرض</button>
+              <button class="btn small" type="button" id="acc-clear">كل المنتجات</button></div>
+          </div></details></div></div>
     <div class="card">
-      <h3 class="card-title">الملخص: ${esc(storeId ? stores.find((st) => String(st.id) === storeId)?.name || '' : 'كل البوتيكات')} (${products.length} منتج)</h3>
+      <h3 class="card-title">الملخص: ${esc(storeId ? stores.find((st) => String(st.id) === storeId)?.name || '' : 'كل البوتيكات')} (${products.length} منتج${picked.size ? ' مختار' : ''})</h3>
       <div class="stat-cards">
         ${big('المبيعات', money(t.revenue), 'blue')}
         ${big('المصاريف', money(t.expenses), 'orange')}
@@ -932,7 +950,7 @@ async function accountingPage() {
         ${big('الكمية الباقية كاملة', t.in_hand + t.returning, 'grey', `قيمتها: <b>${money(t.left_value + t.returning_value)}</b>`)}
       </div>
     </div>
-    ${!storeId && byStore.length ? `<div class="card"><h3 class="card-title">حسب البوتيك</h3><div class="table-wrap"><table>
+    ${!storeId && !picked.size && byStore.length ? `<div class="card"><h3 class="card-title">حسب البوتيك</h3><div class="table-wrap"><table>
       <tr><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الباقي عندي</th><th>قيمتو</th><th>روتور جاي</th><th>قيمتو</th></tr>
       ${byStore.map((x) => `<tr><td><a href="#/accounting?store_id=${x.store.id}">${esc(x.store.name)}</a></td>
         <td class="num">${money(x.revenue)}</td><td class="num">${money(x.expenses)}</td>
@@ -964,7 +982,14 @@ async function accountingPage() {
         <div class="actions" style="align-self:end"><button class="btn primary">حفظ القيم الثابتة</button></div>
       </form>
     </div>`);
-  main.querySelector('#acc-store').onchange = (e) => (location.hash = e.target.value ? `#/accounting?store_id=${e.target.value}` : '#/accounting');
+  main.querySelector('#acc-store').onchange = (e) => goTo(e.target.value, []);
+  const box = main.querySelector('#acc-products');
+  main.querySelector('#acc-search').oninput = (e) => {
+    const term = e.target.value.trim().toLowerCase();
+    box.querySelectorAll('.multi-list label').forEach((l) => l.classList.toggle('hidden', !!term && !l.dataset.name.includes(term)));
+  };
+  main.querySelector('#acc-apply').onclick = () => goTo(storeId, [...box.querySelectorAll('.multi-list input:checked')].map((i) => i.value));
+  main.querySelector('#acc-clear').onclick = () => goTo(storeId, []);
   main.querySelector('#defaults').onsubmit = guard(async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(defaultFields.map(([k]) => [k, e.target.elements[k].value]));
