@@ -228,10 +228,16 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         await logEvent(t, id, 'delivered', note, userId);
         break;
       case 'returned':
+        // The parcel is on its way back: its stock returns only once received.
         if (order.status !== 'dispatched') throw new HttpError(409, 'الطلبية لم ترسل بعد');
-        if (order.stock_reserved) await moveStock(t, order.product_id, id, order.quantity, 'روتور');
-        await set('returned', ', stock_reserved = false, closed_at = now()');
+        await set('returned', ', closed_at = now()');
         await logEvent(t, id, 'returned', note, userId);
+        break;
+      case 'return_received':
+        if (order.status !== 'returned' || order.return_received_at) throw new HttpError(409, 'الروتور وصل من قبل');
+        if (order.stock_reserved) await moveStock(t, order.product_id, id, order.quantity, 'روتور وصل');
+        await t.run('UPDATE orders SET stock_reserved = false, return_received_at = now(), updated_at = now() WHERE id = ?', id);
+        await logEvent(t, id, 'return_received', note, userId);
         break;
       default:
         throw new HttpError(400, `Action inconnue: ${action}`);
@@ -297,7 +303,7 @@ export async function backToConfirmation(db, id, { userId = null } = {}) {
     const current = await getOrder(t, id, { lock: true });
     if (current.status !== order.status) throw new HttpError(409, 'الطلبية تبدلت، عاود حاول');
     if (current.stock_reserved) await moveStock(t, current.product_id, id, current.quantity, 'رجوع للتأكيد');
-    await t.run(`UPDATE orders SET status = 'new', stock_reserved = false, tracking = NULL, dispatch_error = NULL,
+    await t.run(`UPDATE orders SET status = 'new', stock_reserved = false, tracking = NULL, dispatch_error = NULL, delivery_status = NULL,
       confirmed_at = NULL, dispatched_at = NULL, call_attempts = 0, updated_at = now() WHERE id = ?`, id);
     await logEvent(t, id, 'reopened', note, userId);
     return getOrder(t, id);
@@ -321,7 +327,8 @@ export async function syncTracking(db) {
     summary.checked += 1;
     try {
       const company = await companyAccount(db, row.company_id, row.store_id);
-      const { status } = await getProvider(company.provider).getStatus(company, row.tracking);
+      const { raw, status } = await getProvider(company.provider).getStatus(company, row.tracking);
+      if (raw) await db.run('UPDATE orders SET delivery_status = ? WHERE id = ?', String(raw).slice(0, 100), row.order_id);
       if (status === 'delivered' || status === 'returned') {
         await applyAction(db, row.order_id, status, { note: 'تحديث أوتوماتيكي من شركة التوصيل' });
         summary[status] += 1;

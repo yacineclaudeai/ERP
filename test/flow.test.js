@@ -95,7 +95,11 @@ test('landing order → confirm → auto dispatch by wilaya → delivered, with 
   assert.equal(d2.company_name, 'Alger Express');
   await api('POST', `/api/orders/${o2.id}/action`, { action: 'returned' });
   products = (await api('GET', '/api/products')).body;
-  assert.equal(products[0].stock, 8, 'returned stock goes back');
+  assert.equal(products[0].stock, 7, 'a return on its way back is not in stock yet');
+  assert.equal((await api('POST', `/api/orders/${o2.id}/action`, { action: 'return_received' })).body.return_received_at != null, true);
+  products = (await api('GET', '/api/products')).body;
+  assert.equal(products[0].stock, 8, 'received return goes back to stock');
+  assert.equal((await api('POST', `/api/orders/${o2.id}/action`, { action: 'return_received' })).status, 409);
 
   await api('POST', '/api/ad-spend', { product_id: product.id, date: new Date().toISOString().slice(0, 10), amount: 2000 });
   const stats = (await api('GET', '/api/stats')).body;
@@ -473,7 +477,11 @@ test('product accounting: sales minus every expense, auto, default and manual li
   assert.equal(r.expenses, 1218);
   assert.equal(r.profit, -218);
   assert.equal(r.state, 'selling');
-  assert.equal(r.stock, 7);
+  assert.equal(r.stock, 6, 'the return is still on its way');
+  assert.deepEqual(
+    { ...r.pieces },
+    { bought: null, in_hand: 6, reserved: 0, at_company: 1, out_for_delivery: 0, delivered: 2, returning: 1, returned_back: 0, expected_in_hand: null },
+  );
 
   // Manual values: this product's own confirmation price, ads in dollars, an extra expense, sales stopped.
   await api('PUT', `/api/accounting/products/${p.id}`, { confirmation: 40, ads_usd: 2, selling: false, transport_office: 300 });
@@ -489,4 +497,44 @@ test('product accounting: sales minus every expense, auto, default and manual li
   await api('DELETE', `/api/accounting/expenses/${expense.expense_id}`);
   assert.equal((await row()).lines.some((l) => l.expense_id), false);
   assert.equal((await api('PUT', `/api/accounting/products/${p.id}`, { packaging: -1 })).status, 400);
+});
+
+test('purchases: quantity and price bought, and where every piece is now', async () => {
+  const sb = (await api('POST', '/api/delivery/companies', { name: 'Stock Express', provider: 'sandbox' })).body;
+  await api('PUT', '/api/delivery/routes', { default_company_id: sb.id, routes: [] });
+  // 5 pieces of an older batch are already counted in the stock.
+  const p = (await api('POST', '/api/products', { name: 'Stock item', price: 2000, cost: 0, stock: 5 })).body;
+  assert.equal((await api('POST', `/api/accounting/products/${p.id}/purchases`, { quantity: 10, unit_price: 800 })).status, 201);
+  // That older batch is recorded for its cost only.
+  await api('POST', `/api/accounting/products/${p.id}/purchases`, { quantity: 5, unit_price: 700, add_to_stock: false, bought_on: '2026-10-01' });
+  const prod = async () => (await api('GET', '/api/products')).body.find((x) => x.id === p.id);
+  assert.equal((await prod()).stock, 15);
+  assert.equal((await prod()).cost, 700, 'purchase price follows the last purchase');
+
+  const mk = async (phone) => (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'S', phone, wilaya_code: 16 })).body;
+  const [a, b, c, d] = [await mk('0551220101'), await mk('0551220102'), await mk('0551220103'), await mk('0551220104')];
+  for (const o of [a, b, c]) await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' });
+  await api('PUT', '/api/delivery/routes', { auto_dispatch: false });
+  await api('POST', `/api/orders/${d.id}/action`, { action: 'confirm' });
+  await api('PUT', '/api/delivery/routes', { auto_dispatch: true });
+  await api('POST', `/api/orders/${a.id}/action`, { action: 'delivered' });
+  await api('POST', `/api/orders/${b.id}/action`, { action: 'returned' });
+
+  const row = async () => (await api('GET', '/api/accounting')).body.products.find((x) => x.id === p.id);
+  let r = await row();
+  const purchase = r.lines.find((l) => l.key === 'purchase');
+  assert.equal(purchase.amount, 10 * 800 + 5 * 700);
+  assert.equal(purchase.qty, 15);
+  assert.deepEqual({ ...r.pieces }, {
+    bought: 15, in_hand: 12, reserved: 1, at_company: 1, out_for_delivery: 0, delivered: 1, returning: 1, returned_back: 0, expected_in_hand: 12,
+  });
+  await api('POST', `/api/orders/${b.id}/action`, { action: 'return_received' });
+  r = await row();
+  assert.equal(r.pieces.in_hand, 13);
+  assert.equal(r.pieces.expected_in_hand, 13);
+  assert.equal(r.pieces.returned_back, 1);
+
+  await api('DELETE', `/api/accounting/purchases/${r.purchases.find((x) => x.quantity === 10).id}`);
+  assert.equal((await prod()).stock, 2, 'deleting a purchase that was added to stock takes it back out');
+  assert.equal((await api('POST', `/api/accounting/products/${p.id}/purchases`, { quantity: 0, unit_price: 5 })).status, 400);
 });

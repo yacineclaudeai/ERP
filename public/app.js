@@ -7,7 +7,7 @@ const STATUS_LABELS = {
 const EVENT_LABELS = {
   created: 'تسجلت', duplicate: 'مكررة؟', no_answer: 'ما ردش', postponed: 'تأجلت', confirmed: 'تأكدت',
   cancelled: 'تلغات', reopened: 'تعاودت تفتحت', dispatched: 'تبعثت للتوصيل', dispatch_failed: 'فشل الإرسال',
-  delivered: 'تستلمت', returned: 'روتور', edited: 'تعدلت',
+  delivered: 'تستلمت', returned: 'روتور', return_received: 'الروتور وصل', edited: 'تعدلت',
 };
 const SOURCE_LABELS = { landing: 'صفحة الهبوط', sheet: 'شيت', abandoned: 'متروكة', manual: 'يدوي' };
 const SOURCE_ICONS = { landing: '🌐', sheet: '📗', abandoned: '🛒', manual: '✍️' };
@@ -438,6 +438,7 @@ const SOURCE_ICON = { sheet: 'sheet', abandoned: 'cart', landing: 'web', manual:
 
 function statusCell(o) {
   const moves = STATUS_MOVES[o.status];
+  if (o.status === 'returned') return `<span class="pill returned">${o.return_received_at ? 'روتور (وصل)' : 'روتور (في الطريق)'}</span>`;
   if (!moves) return `<span class="pill ${o.status}">${STATUS_LABELS[o.status] || o.status}</span>`;
   const opts = [o.status, ...moves.filter((s) => s !== o.status)];
   return `<select class="pill ${o.status}" data-move>${opts.map((s) =>
@@ -497,6 +498,7 @@ function orderRow(o, products, companies, stores) {
       ${o.status === 'confirmed' || (o.status === 'dispatched' && state.user.role === 'admin')
         ? `<button data-back title="رجّعها لتأكيد الطلبيات${o.status === 'dispatched' ? ' (الطرد يتحذف عند شركة التوصيل)' : ''}">${icon('truck', 'red')}</button>` : ''}
       ${o.tracking ? `<button data-open title="التراكينغ: ${esc(o.tracking)}">${icon('truck', 'green')}</button>` : ''}
+      ${o.status === 'returned' && !o.return_received_at ? '<button class="btn small" data-received title="الطرد الراجع وصل ليدك: السلعة ترجع للستوك">وصل الروتور</button>' : ''}
     </td></tr>`;
 }
 
@@ -562,6 +564,7 @@ function bindOrderTable(table, rows, products, companies, stores) {
     if (e.target.closest('[data-attempt]')) return save(tr, () => api('POST', `/orders/${id}/action`, { action: 'no_answer' }));
     if (e.target.closest('[data-edit]')) return orderForm(byId.get(id), products);
     if (e.target.closest('[data-dispatch]')) return save(tr, () => api('POST', `/orders/${id}/dispatch`, {}));
+    if (e.target.closest('[data-received]')) return save(tr, () => api('POST', `/orders/${id}/action`, { action: 'return_received' }));
     if (e.target.closest('[data-back]')) {
       const o = byId.get(id);
       const ask = o.status === 'dispatched'
@@ -619,6 +622,7 @@ async function openOrder(id) {
       ${o.status === 'dispatched' ? `
         <button class="btn primary" data-action="delivered">مستلمة</button>
         <button class="btn danger" data-action="returned">روتور</button>` : ''}
+      ${o.status === 'returned' && !o.return_received_at ? '<button class="btn primary" data-action="return_received">وصل الروتور (يرجع للستوك)</button>' : ''}
       ${['no_answer', 'postponed'].includes(o.status) ? '<button class="btn" data-action="reset">رجعها جديدة</button>' : ''}
       ${o.status === 'cancelled' ? '<button class="btn" data-action="reopen">إعادة فتح</button>' : ''}
       ${['new', 'no_answer', 'postponed', 'confirmed'].includes(o.status) ? '<button class="btn" data-edit>تعديل</button>' : ''}
@@ -746,7 +750,7 @@ async function accountingPage() {
   const defaultFields = [...Object.entries(unit).map(([k, f]) => [k, `${f.label} (لكل ${f.per})`]), ['creative', 'الكرياتيف (للمنتج)'], ['fx_rate', 'سعر صرف الدولار']];
   const main = shell(`
     <h2>الفايدة لكل منتج</h2>
-    <p class="muted">الفايدة = المبيعات − كل المصاريف. الشراء يتحسب للدفعة كاملة، والستوك الباقي معلومة برك. كل سطر يكون <b>أوتوماتيكي</b> (من الطلبيات) ولا <b>ثابت</b> (سعر عام تحطو هنا) ولا <b>يدوي</b> (تكتبو للمنتج).</p>
+    <p class="muted">الفايدة = المبيعات − كل المصاريف. الشراء يتحسب للدفعة كاملة، والستوك الباقي معلومة برك. <b>عندي</b> = السلعة اللي في يدك (ملموسة)، <b>روتور جاي</b> = راجعة وماوصلتش مازال. كل سطر يكون <b>أوتوماتيكي</b> (من الطلبيات) ولا <b>ثابت</b> (سعر عام تحطو هنا) ولا <b>يدوي</b> (تكتبو للمنتج).</p>
     <div class="kpis">
       <div class="kpi"><div class="l">المبيعات</div><div class="v">${money(a.totals.revenue)}</div></div>
       <div class="kpi"><div class="l">المصاريف</div><div class="v">${money(a.totals.expenses)}</div></div>
@@ -760,13 +764,17 @@ async function accountingPage() {
       </form>
     </div>
     <div class="table-wrap"><table>
-      <tr><th>المنتج</th><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الوضعية</th><th>الستوك الباقي</th><th>ناقص</th><th></th></tr>
+      <tr><th>المنتج</th><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الوضعية</th><th>مشرية</th><th>عندي</th><th>عند التوصيل</th><th>تليفرات</th><th>روتور جاي</th><th>ناقص</th><th></th></tr>
       ${a.products.map((p) => `<tr>
         <td>${esc(p.name)}</td><td>${esc(p.store_name || '—')}</td>
         <td class="num">${money(p.revenue)}</td><td class="num">${money(p.expenses)}</td>
         <td class="num ${p.profit < 0 ? 'neg' : 'pos'}">${money(p.profit)}</td>
         <td>${p.state === 'none' ? '<span class="muted">—</span>' : `<span class="badge ${p.state === 'profit' ? 'delivered' : p.state === 'loss' ? 'cancelled' : 'warn'}">${STATE_LABELS[p.state]}</span>`}</td>
-        <td class="num">${p.stock}</td>
+        <td class="num">${p.pieces.bought ?? '<span class="muted">—</span>'}</td>
+        <td class="num"><b>${p.pieces.in_hand}</b>${stockGap(p)}</td>
+        <td class="num">${p.pieces.at_company + p.pieces.out_for_delivery}</td>
+        <td class="num">${p.pieces.delivered}</td>
+        <td class="num">${p.pieces.returning || '<span class="muted">0</span>'}</td>
         <td>${p.missing.length ? `<span class="badge warn" title="${esc(p.missing.join('، '))}">${p.missing.length}</span>` : '<span class="muted">—</span>'}</td>
         <td><button class="btn small" data-card="${p.id}">البطاقة</button></td></tr>`).join('')}
     </table></div>`);
@@ -780,7 +788,12 @@ async function accountingPage() {
   main.querySelectorAll('[data-card]').forEach((b) => (b.onclick = () => accountingCard(a, a.products.find((p) => p.id === Number(b.dataset.card)))));
 }
 
+// The purchases say more (or fewer) pieces should be in hand than the ERP counts.
+const stockGap = (p) => (p.pieces.expected_in_hand != null && p.pieces.expected_in_hand !== p.pieces.in_hand
+  ? ` <span class="badge warn" title="حسب الشريات لازم يكون عندك ${p.pieces.expected_in_hand}">${p.pieces.expected_in_hand - p.pieces.in_hand > 0 ? '+' : ''}${p.pieces.expected_in_hand - p.pieces.in_hand}</span>` : '');
+
 function accountingCard(a, p) {
+  const k = p.pieces;
   const m = p.manual;
   const field = (k, label, hint = '') => `<label>${esc(label)}<input name="${k}" type="number" step="any" min="0" value="${m[k] ?? ''}" placeholder="${esc(hint)}"></label>`;
   const box = modal.open(`
@@ -794,7 +807,32 @@ function accountingCard(a, p) {
       <tr><td><b>مجموع المصاريف</b></td><td class="num"><b>${money(p.expenses)}</b></td><td></td></tr>
       <tr><td><b>الفايدة</b></td><td class="num ${p.profit < 0 ? 'neg' : 'pos'}"><b>${money(p.profit)}</b></td><td></td></tr>
     </table></div>
-    <p class="muted">القطع الباقية في الستوك: <b>${p.stock}</b> (معلومة برك، ما تتزادش في الفايدة).${p.missing.length ? ` ناقص: ${esc(p.missing.join('، '))}.` : ''}</p>
+    <p class="muted">${p.missing.length ? `ناقص: ${esc(p.missing.join('، '))}. ` : ''}الستوك الباقي معلومة برك، ما يتزادش في الفايدة.</p>
+    <h4 style="margin:6px 0">وين راهي السلعة</h4>
+    <div class="kpis">
+      <div class="kpi"><div class="l">مشرية</div><div class="v">${k.bought ?? '—'}</div></div>
+      <div class="kpi"><div class="l">عندي (ملموسة)</div><div class="v">${k.in_hand}</div>${k.reserved ? `<div class="muted">منها ${k.reserved} محجوزة لطلبيات مؤكدة</div>` : ''}</div>
+      <div class="kpi"><div class="l">عند شركة التوصيل</div><div class="v">${k.at_company}</div></div>
+      <div class="kpi"><div class="l">en livraison</div><div class="v">${k.out_for_delivery}</div></div>
+      <div class="kpi"><div class="l">تليفرات</div><div class="v">${k.delivered}</div></div>
+      <div class="kpi"><div class="l">روتور جاي (غير ملموسة)</div><div class="v">${k.returning}</div></div>
+    </div>
+    ${k.expected_in_hand != null && k.expected_in_hand !== k.in_hand ? `<p class="badge warn">حسب الشريات لازم يكون عندك ${k.expected_in_hand} قطعة، والـ ERP يحسب ${k.in_hand}. شوف الستوك.</p>` : ''}
+    <h4 style="margin:6px 0">الشريات</h4>
+    ${p.purchases.length ? `<div class="table-wrap"><table>
+      <tr><th>التاريخ</th><th>الكمية</th><th>سعر القطعة</th><th>المجموع</th><th>ملاحظة</th><th></th></tr>
+      ${p.purchases.map((x) => `<tr><td>${esc(x.bought_on)}</td><td class="num">${x.quantity}</td><td class="num">${money(x.unit_price)}</td>
+        <td class="num">${money(x.quantity * x.unit_price)}</td><td>${esc(x.note || '')}${x.added_to_stock ? '' : ' <span class="muted">(كانت في الستوك)</span>'}</td>
+        <td><button class="btn small danger" data-del-purchase="${x.id}">✕</button></td></tr>`).join('')}
+    </table></div>` : '<p class="muted">مازال ما سجلت حتى شرية. كي تسجلها، الشراء يتحسب منها.</p>'}
+    <form class="grid3" id="purchase">
+      <label>الكمية المشرية<input name="quantity" type="number" min="1" required></label>
+      <label>سعر القطعة (دج)<input name="unit_price" type="number" step="any" min="0" required value="${p.purchases.at(-1)?.unit_price ?? ''}"></label>
+      <label>التاريخ<input name="bought_on" type="date"></label>
+      <label>ملاحظة<input name="note"></label>
+      <label class="check"><input type="checkbox" name="add_to_stock" checked> زيدها للستوك (نحيها إذا السلعة راهي محسوبة في الستوك من قبل)</label>
+      <div class="actions" style="align-self:end"><button class="btn primary">+ سجل الشرية</button></div>
+    </form>
     <form class="stack" id="costs">
       <h4 style="margin:6px 0">قيم خاصة بهاد المنتج (فارغ = القيمة الثابتة ولا الأوتوماتيكية)</h4>
       <div class="grid3">
@@ -837,6 +875,22 @@ function accountingCard(a, p) {
     await api('POST', `/accounting/products/${p.id}/expenses`, { name: e.target.elements.name.value, amount: e.target.elements.amount.value });
     await reopen();
   });
+  box.querySelector('#purchase').onsubmit = guard(async (e) => {
+    e.preventDefault();
+    const el = e.target.elements;
+    await saveCosts();
+    await api('POST', `/accounting/products/${p.id}/purchases`, {
+      quantity: el.quantity.value, unit_price: el.unit_price.value, bought_on: el.bought_on.value, note: el.note.value, add_to_stock: el.add_to_stock.checked,
+    });
+    toast('تسجلت الشرية');
+    await reopen();
+  });
+  box.querySelectorAll('[data-del-purchase]').forEach((b) => (b.onclick = guard(async () => {
+    if (!confirm('نحذف هاد الشرية؟ إذا كانت تزادت للستوك، الكمية تنقص منو.')) return;
+    await saveCosts();
+    await api('DELETE', `/accounting/purchases/${b.dataset.delPurchase}`);
+    await reopen();
+  })));
   box.querySelectorAll('[data-del-expense]').forEach((b) => (b.onclick = guard(async () => {
     await saveCosts();
     await api('DELETE', `/accounting/expenses/${b.dataset.delExpense}`);

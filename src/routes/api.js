@@ -9,7 +9,9 @@ import {
   confirmAndDispatch, dispatchOrder, backToConfirmation, syncTracking, rerouteProductOrders, deleteOrder,
 } from '../services/orders.js';
 import { getStats, localDay } from '../services/stats.js';
-import { getAccounting, saveDefaults, saveProductCosts, addExpense, deleteExpense } from '../services/accounting.js';
+import {
+  getAccounting, saveDefaults, saveProductCosts, addExpense, deleteExpense, addPurchase, deletePurchase,
+} from '../services/accounting.js';
 import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
@@ -481,6 +483,14 @@ export function apiRouter(db) {
   });
   r.delete('/accounting/expenses/:id', requireAdmin, async (c) => {
     await deleteExpense(db, idParam(c));
+    return c.json({ ok: true });
+  });
+  r.post('/accounting/products/:id/purchases', requireAdmin, async (c) => {
+    await addPurchase(db, idParam(c), body(c));
+    return c.json({ ok: true }, 201);
+  });
+  r.delete('/accounting/purchases/:id', requireAdmin, async (c) => {
+    await deletePurchase(db, idParam(c));
     return c.json({ ok: true });
   });
 

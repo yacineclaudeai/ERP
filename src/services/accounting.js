@@ -66,6 +66,40 @@ export async function deleteExpense(db, id) {
   await db.run('DELETE FROM product_expenses WHERE id = ?', id);
 }
 
+// A purchase of goods: its pieces join the stock unless they were already counted there.
+export async function addPurchase(db, productId, { quantity, unit_price, bought_on, note, add_to_stock = true }) {
+  const qty = Math.round(num(quantity) ?? 0);
+  const price = num(unit_price);
+  if (!qty || price == null) throw new HttpError(400, 'الكمية والسعر ضروريين');
+  const day = bought_on && /^\d{4}-\d{2}-\d{2}$/.test(bought_on) ? bought_on : null;
+  await db.tx(async (t) => {
+    if (!await t.get('SELECT id FROM products WHERE id = ?', productId)) throw new HttpError(404, 'المنتج غير موجود');
+    const added = Boolean(add_to_stock);
+    const { id } = await t.get(`INSERT INTO product_purchases (product_id, quantity, unit_price, bought_on, added_to_stock, note)
+      VALUES (?, ?, ?, COALESCE(?::date, CURRENT_DATE), ?, ?) RETURNING id`, productId, qty, price, day, added, note ? String(note).slice(0, 300) : null);
+    if (added) await stockMove(t, productId, qty, `شرية رقم ${id}`);
+    // The product's purchase price follows the last purchase.
+    await t.run('UPDATE products SET cost = ? WHERE id = ?', price, productId);
+  });
+}
+
+export async function deletePurchase(db, id) {
+  await db.tx(async (t) => {
+    const p = await t.get('SELECT * FROM product_purchases WHERE id = ?', id);
+    if (!p) throw new HttpError(404, 'الشرية غير موجودة');
+    if (p.added_to_stock) await stockMove(t, p.product_id, -p.quantity, `حذف الشرية رقم ${id}`);
+    await t.run('DELETE FROM product_purchases WHERE id = ?', id);
+  });
+}
+
+async function stockMove(t, productId, quantity, reason) {
+  await t.run('UPDATE products SET stock = stock + ? WHERE id = ?', quantity, productId);
+  await t.run('INSERT INTO stock_movements (product_id, quantity, reason) VALUES (?, ?, ?)', productId, quantity, reason);
+}
+
+// "On its way to the customer" in the delivery company's own words.
+const OUT_FOR_DELIVERY = /en.?livraison|sortie|out.?for|vers.?client|chez.?livreur/i;
+
 const round = (n) => Math.round(n * 100) / 100;
 
 export async function getAccounting(db) {
@@ -79,12 +113,25 @@ export async function getAccounting(db) {
       COUNT(o.id) FILTER (WHERE o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed_orders,
       COUNT(o.id) FILTER (WHERE o.status IN ('dispatched','delivered','returned')) AS parcels,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.stock_reserved), 0) AS out_qty,
+      COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'confirmed' AND o.stock_reserved), 0) AS reserved_qty,
+      COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'returned' AND o.return_received_at IS NULL AND o.stock_reserved), 0) AS returning_qty,
+      COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'returned' AND o.return_received_at IS NOT NULL), 0) AS returned_back_qty,
       (SELECT COALESCE(SUM(amount), 0) FROM ad_spend a WHERE a.product_id = p.id) AS ads_dzd
     FROM products p LEFT JOIN stores s ON s.id = p.store_id
     LEFT JOIN orders o ON o.product_id = p.id AND o.status <> 'fake'
     GROUP BY p.id, s.name ORDER BY p.id`);
   const costs = new Map((await db.all('SELECT * FROM product_costs')).map((c) => [c.product_id, c]));
   const expenses = await db.all('SELECT id, product_id, name, amount FROM product_expenses ORDER BY id');
+  const purchases = await db.all(`SELECT id, product_id, quantity, unit_price, to_char(bought_on, 'YYYY-MM-DD') AS bought_on, added_to_stock, note
+    FROM product_purchases ORDER BY bought_on, id`);
+  const purchasesOf = new Map();
+  for (const x of purchases) (purchasesOf.get(x.product_id) || purchasesOf.set(x.product_id, []).get(x.product_id)).push(x);
+  // Parcels at the delivery company, split by what the company last said about them.
+  const shipping = new Map();
+  for (const o of await db.all("SELECT product_id, quantity, delivery_status FROM orders WHERE status = 'dispatched'")) {
+    const s = shipping.get(o.product_id) || shipping.set(o.product_id, { at_company: 0, out_for_delivery: 0 }).get(o.product_id);
+    s[OUT_FOR_DELIVERY.test(o.delivery_status || '') ? 'out_for_delivery' : 'at_company'] += o.quantity;
+  }
   const byProduct = new Map();
   for (const e of expenses) (byProduct.get(e.product_id) || byProduct.set(e.product_id, []).get(e.product_id)).push(e);
 
@@ -93,10 +140,34 @@ export async function getAccounting(db) {
     const lines = [];
     const missing = [];
     const batchAuto = p.stock + p.out_qty;
-    const batch = c.batch_qty ?? batchAuto;
-    lines.push({ key: 'purchase', label: 'الشراء (الدفعة كاملة)', qty: batch, unit: p.cost, amount: batch * p.cost,
-      mode: c.batch_qty != null ? 'manual' : 'auto', note: `${batch} قطعة × ${p.cost}` });
-    if (!p.cost) missing.push('سعر الشراء');
+    const bought = purchasesOf.get(p.id) || [];
+    const boughtQty = bought.reduce((a, x) => a + x.quantity, 0);
+    if (bought.length) {
+      const amount = bought.reduce((a, x) => a + x.quantity * x.unit_price, 0);
+      lines.push({ key: 'purchase', label: 'الشراء (كل الشريات)', qty: boughtQty, amount, mode: 'manual',
+        note: bought.map((x) => `${x.quantity} × ${x.unit_price}`).join(' + ') });
+    } else {
+      const batch = c.batch_qty ?? batchAuto;
+      lines.push({ key: 'purchase', label: 'الشراء (الدفعة كاملة)', qty: batch, unit: p.cost, amount: batch * p.cost,
+        mode: c.batch_qty != null ? 'manual' : 'auto', note: `${batch} قطعة × ${p.cost}` });
+      if (!p.cost) missing.push('سعر الشراء');
+    }
+    // Where every piece is: with me (touchable), out with the company, or coming back.
+    const ship = shipping.get(p.id) || { at_company: 0, out_for_delivery: 0 };
+    const pieces = {
+      bought: bought.length ? boughtQty : null,
+      in_hand: p.stock + p.reserved_qty,
+      reserved: p.reserved_qty,
+      at_company: ship.at_company,
+      out_for_delivery: ship.out_for_delivery,
+      delivered: p.delivered_qty,
+      returning: p.returning_qty,
+      returned_back: p.returned_back_qty,
+    };
+    // What should be left from the purchases, to compare with the stock counted by the ERP.
+    pieces.expected_in_hand = bought.length
+      ? boughtQty - pieces.at_company - pieces.out_for_delivery - pieces.delivered - pieces.returning
+      : null;
     const basis = { packaging: p.shipped_qty, labels: p.shipped_qty, return_packaging: p.returned_qty, confirmation: p.confirmed_orders, tracking: p.parcels };
     for (const [key, f] of Object.entries(UNIT_FIELDS)) {
       const own = c[key];
@@ -128,6 +199,7 @@ export async function getAccounting(db) {
       expenses: round(expensesTotal), profit: round(profit),
       state: !p.revenue && !expensesTotal ? 'none' : profit >= 0 ? 'profit' : selling ? 'selling' : 'loss',
       selling, batch_auto: batchAuto, batch_manual: c.batch_qty ?? null, notes: c.notes ?? null,
+      pieces, purchases: bought,
       manual: Object.fromEntries([...PRODUCT_NUMBERS].map((k) => [k, c[k] ?? null])),
       missing, lines: lines.map((l) => ({ ...l, amount: round(l.amount) })),
     };
