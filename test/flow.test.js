@@ -469,17 +469,20 @@ test('product accounting: sales minus every expense, auto, default and manual li
   assert.ok(r.missing.includes('التأكيد'));
   assert.equal(r.profit, 0);
 
-  await api('PUT', '/api/accounting/defaults', { packaging: 5, labels: 2, return_packaging: 10, confirmation: 50, tracking: 10, fx_rate: 250 });
+  await api('PUT', '/api/accounting/defaults', { packaging: 5, labels: 2, confirmation: 50, tracking: 10, fx_rate: 250 });
   r = await row();
-  assert.equal(line(r, 'packaging').amount, 20);
-  assert.equal(line(r, 'labels').amount, 8);
-  assert.equal(line(r, 'return_packaging').amount, 10);
+  // Packed and labelled once per parcel sent, the return included.
+  assert.equal(line(r, 'packaging').amount, 15);
+  assert.equal(line(r, 'labels').amount, 6);
+  assert.equal(line(r, 'return_packaging'), undefined);
   assert.equal(line(r, 'confirmation').amount, 150, 'confirmed orders, the returned one included');
   assert.equal(line(r, 'tracking').amount, 30);
-  assert.equal(r.expenses, 1218);
-  assert.equal(r.profit, -218);
+  assert.equal(r.expenses, 1201);
+  assert.equal(r.profit, -201);
   assert.equal(r.state, 'selling');
   assert.equal(r.stock, 6, 'the return is still on its way');
+  assert.equal(r.left_value, 600, 'pieces in hand at the purchase price');
+  assert.equal(r.returning_value, 100);
   assert.deepEqual(
     { ...r.pieces },
     { bought: null, in_hand: 6, reserved: 0, at_company: 1, out_for_delivery: 0, delivered: 2, returning: 1, returned_back: 0, expected_in_hand: null },
@@ -493,7 +496,7 @@ test('product accounting: sales minus every expense, auto, default and manual li
   assert.equal(line(r, 'confirmation').mode, 'manual');
   assert.equal(line(r, 'ads').amount, 500);
   assert.equal(line(r, 'transport_office').amount, 300);
-  assert.equal(r.expenses, 1000 + 20 + 8 + 10 + 120 + 30 + 500 + 300 + 100);
+  assert.equal(r.expenses, 1000 + 15 + 6 + 120 + 30 + 500 + 300 + 100);
   assert.equal(r.state, 'loss');
   const expense = r.lines.find((l) => l.expense_id);
   await api('DELETE', `/api/accounting/expenses/${expense.expense_id}`);

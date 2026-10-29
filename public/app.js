@@ -902,39 +902,69 @@ const MODE_LABELS = { auto: 'أوتوماتيكي', default: 'ثابت', manual:
 const STATE_LABELS = { profit: 'ربح', selling: 'قيد البيع', loss: 'خسارة', none: '—' };
 
 async function accountingPage() {
-  const a = await api('GET', '/accounting');
+  const [a, stores] = await Promise.all([api('GET', '/accounting'), api('GET', '/stores')]);
+  const storeId = new URLSearchParams(location.hash.split('?')[1] || '').get('store_id') || '';
+  const products = a.products.filter((p) => !storeId || String(p.store_id) === storeId);
   const unit = a.unit_fields;
   const defaultFields = [...Object.entries(unit).map(([k, f]) => [k, `${f.label} (لكل ${f.per})`]), ['creative', 'الكرياتيف (للمنتج)'], ['fx_rate', 'سعر صرف الدولار']];
+  // Totals of the products shown: profit, and the goods left with their purchase value.
+  const sum = (list) => list.reduce((t, p) => ({
+    revenue: t.revenue + p.revenue, expenses: t.expenses + p.expenses, profit: t.profit + p.profit,
+    in_hand: t.in_hand + p.pieces.in_hand, left_value: t.left_value + p.left_value,
+    returning: t.returning + p.pieces.returning, returning_value: t.returning_value + p.returning_value,
+  }), { revenue: 0, expenses: 0, profit: 0, in_hand: 0, left_value: 0, returning: 0, returning_value: 0 });
+  const t = sum(products);
+  const byStore = stores.map((st) => ({ store: st, ...sum(a.products.filter((p) => p.store_id === st.id)) }))
+    .filter((x) => x.revenue || x.expenses || x.in_hand || x.returning);
+  const big = (label, value, cls = '', sub = '') => `<div class="stat-card ${cls}"><div class="l">${esc(label)}</div><div class="v">${value}</div>${sub ? `<div class="muted">${sub}</div>` : ''}</div>`;
   const main = shell(`
     <h2>الفايدة لكل منتج</h2>
-    <p class="muted">الفايدة = المبيعات − كل المصاريف. الشراء يتحسب للدفعة كاملة، والستوك الباقي معلومة برك. <b>عندي</b> = السلعة اللي في يدك (ملموسة)، <b>روتور جاي</b> = راجعة وماوصلتش مازال. كل سطر يكون <b>أوتوماتيكي</b> (من الطلبيات) ولا <b>ثابت</b> (سعر عام تحطو هنا) ولا <b>يدوي</b> (تكتبو للمنتج).</p>
-    <div class="kpis">
-      <div class="kpi"><div class="l">المبيعات</div><div class="v">${money(a.totals.revenue)}</div></div>
-      <div class="kpi"><div class="l">المصاريف</div><div class="v">${money(a.totals.expenses)}</div></div>
-      <div class="kpi"><div class="l">الفايدة</div><div class="v ${a.totals.profit < 0 ? 'neg' : 'pos'}">${money(a.totals.profit)}</div></div>
-    </div>
+    <div class="bar"><label>البوتيك<select id="acc-store"><option value="">كل البوتيكات</option>
+      ${stores.map((st) => `<option value="${st.id}" ${String(st.id) === storeId ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></label></div>
     <div class="card">
-      <h3 style="margin-top:0">القيم الثابتة (لكل المنتجات)</h3>
-      <form class="grid3" id="defaults">
-        ${defaultFields.map(([k, l]) => `<label>${esc(l)}<input name="${k}" type="number" step="any" min="0" value="${a.defaults[k] ?? ''}" placeholder="فارغ = ما حطيتوش"></label>`).join('')}
-        <div class="actions" style="align-self:end"><button class="btn primary">حفظ القيم الثابتة</button></div>
-      </form>
+      <h3 class="card-title">الملخص: ${esc(storeId ? stores.find((st) => String(st.id) === storeId)?.name || '' : 'كل البوتيكات')} (${products.length} منتج)</h3>
+      <div class="stat-cards">
+        ${big('المبيعات', money(t.revenue), 'blue')}
+        ${big('المصاريف', money(t.expenses), 'orange')}
+        ${big('الفايدة', money(t.profit), t.profit < 0 ? 'red' : 'green')}
+        ${big('الكمية الباقية عندي (ملموسة)', t.in_hand, 'green', `قيمتها بسعر الشراء: <b>${money(t.left_value)}</b>`)}
+        ${big('روتور جاي (غير ملموسة)', t.returning, 'purple', `قيمتو: <b>${money(t.returning_value)}</b>`)}
+        ${big('الكمية الباقية كاملة', t.in_hand + t.returning, 'grey', `قيمتها: <b>${money(t.left_value + t.returning_value)}</b>`)}
+      </div>
     </div>
+    ${!storeId && byStore.length ? `<div class="card"><h3 class="card-title">حسب البوتيك</h3><div class="table-wrap"><table>
+      <tr><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الباقي عندي</th><th>قيمتو</th><th>روتور جاي</th><th>قيمتو</th></tr>
+      ${byStore.map((x) => `<tr><td><a href="#/accounting?store_id=${x.store.id}">${esc(x.store.name)}</a></td>
+        <td class="num">${money(x.revenue)}</td><td class="num">${money(x.expenses)}</td>
+        <td class="num ${x.profit < 0 ? 'neg' : 'pos'}">${money(x.profit)}</td>
+        <td class="num">${x.in_hand}</td><td class="num">${money(x.left_value)}</td>
+        <td class="num">${x.returning}</td><td class="num">${money(x.returning_value)}</td></tr>`).join('')}
+    </table></div></div>` : ''}
     <div class="table-wrap"><table>
-      <tr><th>المنتج</th><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الوضعية</th><th>مشرية</th><th>عندي</th><th>عند التوصيل</th><th>تليفرات</th><th>روتور جاي</th><th>ناقص</th><th></th></tr>
-      ${a.products.map((p) => `<tr>
+      <tr><th>المنتج</th><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الوضعية</th><th>مشرية</th><th>عندي</th><th>قيمة الباقي</th><th>عند التوصيل</th><th>تليفرات</th><th>روتور جاي</th><th>ناقص</th><th></th></tr>
+      ${products.map((p) => `<tr>
         <td>${esc(p.name)}</td><td>${esc(p.store_name || '—')}</td>
         <td class="num">${money(p.revenue)}</td><td class="num">${money(p.expenses)}</td>
         <td class="num ${p.profit < 0 ? 'neg' : 'pos'}">${money(p.profit)}</td>
         <td>${p.state === 'none' ? '<span class="muted">—</span>' : `<span class="badge ${p.state === 'profit' ? 'delivered' : p.state === 'loss' ? 'cancelled' : 'warn'}">${STATE_LABELS[p.state]}</span>`}</td>
         <td class="num">${p.pieces.bought ?? '<span class="muted">—</span>'}</td>
         <td class="num"><b>${p.pieces.in_hand}</b>${stockGap(p)}</td>
+        <td class="num">${money(p.left_value)}</td>
         <td class="num">${p.pieces.at_company + p.pieces.out_for_delivery}</td>
         <td class="num">${p.pieces.delivered}</td>
         <td class="num">${p.pieces.returning || '<span class="muted">0</span>'}</td>
         <td>${p.missing.length ? `<span class="badge warn" title="${esc(p.missing.join('، '))}">${p.missing.length}</span>` : '<span class="muted">—</span>'}</td>
-        <td><button class="btn small" data-card="${p.id}">البطاقة</button></td></tr>`).join('')}
-    </table></div>`);
+        <td><button class="btn small" data-card="${p.id}">البطاقة</button></td></tr>`).join('') || '<tr><td colspan="14" class="muted">ما كاين حتى منتج في هاد البوتيك</td></tr>'}
+    </table></div>
+    <p class="muted">الفايدة = المبيعات − كل المصاريف. الشراء يتحسب للدفعة كاملة، والستوك الباقي معلومة برك. التغليف والإتيكات يتحسبو لكل طلبية تبعثت، حتى اللي ولات روتور. <b>عندي</b> = السلعة اللي في يدك (ملموسة)، <b>روتور جاي</b> = راجعة وماوصلتش مازال. كل سطر يكون <b>أوتوماتيكي</b> (من الطلبيات) ولا <b>ثابت</b> (سعر عام تحطو هنا) ولا <b>يدوي</b> (تكتبو للمنتج).</p>
+    <div class="card">
+      <h3 style="margin-top:0">القيم الثابتة (لكل المنتجات)</h3>
+      <form class="grid3" id="defaults">
+        ${defaultFields.map(([k, l]) => `<label>${esc(l)}<input name="${k}" type="number" step="any" min="0" value="${a.defaults[k] ?? ''}" placeholder="فارغ = ما حطيتوش"></label>`).join('')}
+        <div class="actions" style="align-self:end"><button class="btn primary">حفظ القيم الثابتة</button></div>
+      </form>
+    </div>`);
+  main.querySelector('#acc-store').onchange = (e) => (location.hash = e.target.value ? `#/accounting?store_id=${e.target.value}` : '#/accounting');
   main.querySelector('#defaults').onsubmit = guard(async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(defaultFields.map(([k]) => [k, e.target.elements[k].value]));

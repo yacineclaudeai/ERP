@@ -6,9 +6,9 @@ import { HttpError } from './orders.js';
 
 // Prices per unit, shared by all products unless a product has its own.
 export const UNIT_FIELDS = {
-  packaging: { label: 'التغليف', per: 'قطعة مبعوثة' },
-  labels: { label: 'الإتيكات', per: 'قطعة مبعوثة' },
-  return_packaging: { label: 'تغليف الرتور', per: 'قطعة راجعة' },
+  // Every parcel sent is packed and labelled once, even if it comes back as a return.
+  packaging: { label: 'التغليف', per: 'طلبية مبعوثة' },
+  labels: { label: 'الإتيكات', per: 'طلبية مبعوثة' },
   confirmation: { label: 'التأكيد', per: 'طلبية مؤكدة' },
   tracking: { label: 'السويفي (التتبع)', per: 'كولي' },
 };
@@ -105,11 +105,9 @@ const round = (n) => Math.round(n * 100) / 100;
 export async function getAccounting(db) {
   const defaults = await getDefaults(db);
   const rows = await db.all(`
-    SELECT p.id, p.name, p.cost, p.stock, s.name AS store_name,
+    SELECT p.id, p.name, p.cost, p.stock, p.store_id, s.name AS store_name,
       COALESCE(SUM(o.unit_price * o.quantity) FILTER (WHERE o.status = 'delivered'), 0) AS revenue,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'delivered'), 0) AS delivered_qty,
-      COALESCE(SUM(o.quantity) FILTER (WHERE o.status IN ('dispatched','delivered','returned')), 0) AS shipped_qty,
-      COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'returned'), 0) AS returned_qty,
       COUNT(o.id) FILTER (WHERE o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed_orders,
       COUNT(o.id) FILTER (WHERE o.status IN ('dispatched','delivered','returned')) AS parcels,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.stock_reserved), 0) AS out_qty,
@@ -168,7 +166,7 @@ export async function getAccounting(db) {
     pieces.expected_in_hand = bought.length
       ? boughtQty - pieces.at_company - pieces.out_for_delivery - pieces.delivered - pieces.returning
       : null;
-    const basis = { packaging: p.shipped_qty, labels: p.shipped_qty, return_packaging: p.returned_qty, confirmation: p.confirmed_orders, tracking: p.parcels };
+    const basis = { packaging: p.parcels, labels: p.parcels, confirmation: p.confirmed_orders, tracking: p.parcels };
     for (const [key, f] of Object.entries(UNIT_FIELDS)) {
       const own = c[key];
       const unit = own ?? defaults[key];
@@ -194,7 +192,9 @@ export async function getAccounting(db) {
     const profit = p.revenue - expensesTotal;
     const selling = c.selling ?? true;
     return {
-      id: p.id, name: p.name, store_name: p.store_name, stock: p.stock,
+      id: p.id, name: p.name, store_id: p.store_id, store_name: p.store_name, stock: p.stock, cost: p.cost,
+      // Pieces left, priced at the purchase price: in hand, and returns still on their way.
+      left_value: round(pieces.in_hand * p.cost), returning_value: round(pieces.returning * p.cost),
       revenue: round(p.revenue), delivered_qty: p.delivered_qty,
       expenses: round(expensesTotal), profit: round(profit),
       state: !p.revenue && !expensesTotal ? 'none' : profit >= 0 ? 'profit' : selling ? 'selling' : 'loss',
