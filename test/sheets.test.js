@@ -40,6 +40,8 @@ before(async () => {
   process.env.ADMIN_USERNAME = 'admin';
   process.env.ADMIN_PASSWORD = 'admin123';
   db = await openLocalDb();
+  // Most tests route by store or wilaya; the TEST store for new products has its own test.
+  await db.run("UPDATE settings SET value = NULL WHERE key = 'new_product_store_id'");
   const app = createApp(db);
   server = await new Promise((resolve) => {
     const s = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, () => resolve(s));
@@ -82,7 +84,7 @@ test('csv, sheet links, wilayas and column guessing', () => {
 });
 
 test('LightFunnels sheet: new rows come in once, products are matched or created', async () => {
-  const store = (await api('POST', '/api/stores', { name: 'Boutique Test Sheets' })).body;
+  const store = (await api('POST', '/api/stores', { name: 'Boutique Sheets Alpha' })).body;
   const watch = (await api('POST', '/api/products', { name: 'Montre Luxe', price: 3000, stock: 4, store_id: store.id })).body;
   const url = 'https://docs.google.com/spreadsheets/d/real-sheet/edit#gid=0';
 

@@ -2,6 +2,7 @@
 // The sheet is read as CSV through its share link, so it must be shared as "anyone with the link: viewer".
 import { WILAYAS } from '../wilayas.js';
 import { HttpError, createOrder, normalizePhone } from './orders.js';
+import { newProductStore } from './branches.js';
 
 // Fields an order can take from a sheet column, with the header names that usually hold them.
 export const SHEET_FIELDS = {
@@ -135,7 +136,8 @@ function sheetPhone(v) {
   return normalizePhone(/^[567]\d{8}$/.test(p) ? `0${p}` : p);
 }
 
-// The product a row is for: same name or SKU in this store, else created in the store with stock 0.
+// The product a row is for: same name or SKU in this store, else created with stock 0
+// in the store for new products (TEST), or in the sheet's store.
 async function productFor(db, source, name, sku, unitPrice) {
   const key = fold(name);
   const products = await db.all('SELECT id, name, sku, store_id FROM products');
@@ -146,7 +148,7 @@ async function productFor(db, source, name, sku, unitPrice) {
   if (found) return found.id;
   const { rows } = await db.run(`
     INSERT INTO products (name, sku, price, public_key, store_id) VALUES (?, ?, ?, ?, ?) RETURNING id`,
-  String(name).trim(), sku || null, unitPrice ?? 0, `sheet-${crypto.randomUUID()}`, source.store_id);
+  String(name).trim(), sku || null, unitPrice ?? 0, `sheet-${crypto.randomUUID()}`, (await newProductStore(db)) ?? source.store_id);
   return rows[0].id;
 }
 

@@ -15,7 +15,7 @@ import {
 import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
-import { scanStore, applyStoreLinks, normalizeName } from '../services/branches.js';
+import { scanStore, applyStoreLinks, normalizeName, newProductStore } from '../services/branches.js';
 import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet } from '../services/sheets.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
@@ -83,6 +83,8 @@ export function apiRouter(db) {
   r.post('/products', requireAdmin, async (c) => {
     const f = productFields(body(c));
     if (!f.name) throw new HttpError(400, 'اسم المنتج ضروري');
+    // A new product is a test until the user moves it to a real store.
+    f.store_id ??= await newProductStore(db);
     const stock = Math.floor(Number(body(c).stock) || 0);
     const product = await db.tx(async (t) => {
       const { rows: [p] } = await t.run(`
@@ -324,8 +326,10 @@ export function apiRouter(db) {
     const routes = await db.all(`
       SELECT r.*, c.name AS company_name FROM store_routes r JOIN delivery_companies c ON c.id = r.company_id
       ORDER BY r.wilaya_code`);
+    const newStore = await newProductStore(db);
     return c.json(stores.map((s) => ({
       ...s,
+      new_products: s.id === newStore,
       routes: routes.filter((x) => x.store_id === s.id),
       accounts: accounts.filter((x) => x.store_id === s.id),
     })));
@@ -377,6 +381,12 @@ export function apiRouter(db) {
     });
   };
 
+  r.put('/stores/new-products', requireAdmin, async (c) => {
+    const id = Number(body(c).store_id) || null;
+    if (id && !await db.get('SELECT id FROM stores WHERE id = ?', id)) throw new HttpError(404, 'البوتيك غير موجودة');
+    await setSetting(db, 'new_product_store_id', id ? String(id) : null);
+    return c.json({ ok: true });
+  });
   r.post('/stores', requireAdmin, async (c) => c.json({ id: await saveStore(null, body(c)) }, 201));
   r.put('/stores/:id', requireAdmin, async (c) => {
     const id = await saveStore(idParam(c), body(c));

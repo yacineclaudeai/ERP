@@ -1143,16 +1143,23 @@ async function storesPage() {
   const main = shell(`
     <h2>البوتيكات</h2>
     <p class="muted">كل بوتيك عندها شركة توصيل، وعندها حسابها الخاص (التوكن) عند كل شركة تخدم معاها. باش تزيد توكن لبوتيك كاينة اضغط "تعديل" قدامها (ماشي "+ بوتيك"). المنتجات تتربط بالبوتيك والشركة من صفحة "المنتجات".</p>
-    <div class="bar"><button class="btn primary" id="add">+ بوتيك</button></div>
+    <div class="bar"><button class="btn primary" id="add">+ بوتيك</button>
+      <label>المنتجات الجديدة تروح لـ <select id="new-products"><option value="">— بلا بوتيك</option>
+        ${stores.map((s) => `<option value="${s.id}" ${s.new_products ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
     <div class="table-wrap"><table>
       <tr><th>البوتيك</th><th>شركة التوصيل</th><th>الحسابات (التوكن)</th><th>استثناءات حسب الولاية</th><th>منتجات</th><th></th></tr>
-      ${stores.map((s) => `<tr><td>${esc(s.name)}</td><td>${esc(s.company_name || '— (حسب الولاية)')}</td>
+      ${stores.map((s) => `<tr><td>${esc(s.name)}${s.new_products ? ' <span class="badge warn">المنتجات الجديدة</span>' : ''}</td><td>${esc(s.company_name || '— (حسب الولاية)')}</td>
         <td class="muted">${s.accounts.filter((a) => a.has_token).map((a) => `${esc(a.company_name)} ✓`).join('، ') || '<span class="neg">ما كاين حتى توكن</span>'}</td>
         <td class="muted">${s.routes.map((r) => `${wilaya(r.wilaya_code)} ← ${esc(r.company_name)}`).join('، ') || '—'}</td>
         <td class="num">${s.products_count}</td>
         <td><button class="btn small" data-edit="${s.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">زيد البوتيك الأولى</td></tr>'}
     </table></div>`);
   main.querySelector('#add').onclick = () => storeForm(null, companies);
+  main.querySelector('#new-products').onchange = guard(async (e) => {
+    await api('PUT', '/stores/new-products', { store_id: e.target.value });
+    toast('تم الحفظ');
+    router();
+  });
   main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => storeForm(stores.find((s) => s.id === Number(b.dataset.edit)), companies)));
 }
 

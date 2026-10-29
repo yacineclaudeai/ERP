@@ -1,8 +1,16 @@
 // Links each product to its store (branch) from what the stores already
 // shipped: every store has its own delivery account, so the products named in
 // that account's parcels belong to that store. Read-only on the delivery side.
+import { getSetting } from '../db.js';
 import { getProvider } from '../delivery/index.js';
 import { HttpError, companyAccount, rerouteProductOrders } from './orders.js';
+
+// The store every new product starts in (the "TEST" store), or null.
+export async function newProductStore(db) {
+  const id = Number(await getSetting(db, 'new_product_store_id'));
+  if (!id) return null;
+  return (await db.get('SELECT id FROM stores WHERE id = ?', id))?.id ?? null;
+}
 
 export const normalizeName = (v) => String(v ?? '')
   .toLowerCase()

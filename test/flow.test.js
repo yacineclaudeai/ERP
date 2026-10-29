@@ -25,6 +25,8 @@ before(async () => {
   process.env.ADMIN_PASSWORD = 'admin123';
   delete process.env.AUTOMATION_TOKEN;
   db = await openLocalDb();
+  // Most tests route by store or wilaya; the TEST store for new products has its own test.
+  await db.run("UPDATE settings SET value = NULL WHERE key = 'new_product_store_id'");
   const app = createApp(db);
   server = await new Promise((resolve) => {
     const s = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, () => resolve(s));
@@ -157,7 +159,7 @@ test('a store ships through its own account, with per-wilaya exceptions', async 
   const hhd = (await api('POST', '/api/delivery/companies', { name: 'HHD', provider: 'sandbox' })).body;
   const dhd = (await api('POST', '/api/delivery/companies', { name: 'DHD', provider: 'sandbox' })).body;
   const store = (await api('POST', '/api/stores', {
-    name: 'BOUTIQUE TEST', company_id: hhd.id, routes: [{ wilaya_code: 35, company_id: dhd.id }],
+    name: 'BOUTIQUE ALPHA', company_id: hhd.id, routes: [{ wilaya_code: 35, company_id: dhd.id }],
   })).body;
   const product = (await api('POST', '/api/products', { name: 'Parfum', price: 2900, stock: 5, store_id: store.id })).body;
 
@@ -169,9 +171,9 @@ test('a store ships through its own account, with per-wilaya exceptions', async 
   assert.equal((await send(35)).company_name, 'DHD');
 
   const stores = (await api('GET', '/api/stores')).body;
-  assert.equal(stores.find((s) => s.name === 'BOUTIQUE TEST').routes.length, 1);
+  assert.equal(stores.find((s) => s.name === 'BOUTIQUE ALPHA').routes.length, 1);
   const stats = (await api('GET', '/api/stats')).body;
-  assert.equal(stats.by_store.find((s) => s.store_name === 'BOUTIQUE TEST').orders, 2);
+  assert.equal(stats.by_store.find((s) => s.store_name === 'BOUTIQUE ALPHA').orders, 2);
 });
 
 test('ad plan launches in-stock products and pauses sold-out campaigns', async () => {
@@ -537,4 +539,27 @@ test('purchases: quantity and price bought, and where every piece is now', async
   await api('DELETE', `/api/accounting/purchases/${r.purchases.find((x) => x.quantity === 10).id}`);
   assert.equal((await prod()).stock, 2, 'deleting a purchase that was added to stock takes it back out');
   assert.equal((await api('POST', `/api/accounting/products/${p.id}/purchases`, { quantity: 0, unit_price: 5 })).status, 400);
+});
+
+test('new products start in the TEST store with the TEST company, until moved', async () => {
+  const stores = (await api('GET', '/api/stores')).body;
+  const testStore = stores.find((s) => s.name === 'TEST');
+  assert.equal(testStore.company_name, 'TEST');
+  assert.equal((await api('PUT', '/api/stores/new-products', { store_id: testStore.id })).status, 200);
+  assert.equal((await api('GET', '/api/stores')).body.find((s) => s.id === testStore.id).new_products, true);
+
+  const p = (await api('POST', '/api/products', { name: 'Produit en test', price: 1000 })).body;
+  assert.equal(p.store_id, testStore.id);
+  const other = stores.find((s) => s.name === 'YACINE');
+  const chosen = (await api('POST', '/api/products', { name: 'Produit direct', price: 1000, store_id: other.id })).body;
+  assert.equal(chosen.store_id, other.id, 'a store picked by hand is kept');
+
+  const o = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'T', phone: '0551330101', wilaya_code: 16 })).body;
+  assert.equal((await api('GET', `/api/orders/${o.id}`)).body.company_name, 'TEST');
+  // Moved to a real store once the test works: its open order follows.
+  await api('PUT', `/api/products/${p.id}/store`, { store_id: other.id });
+  assert.notEqual((await api('GET', `/api/orders/${o.id}`)).body.company_name, 'TEST');
+
+  await api('PUT', '/api/stores/new-products', { store_id: '' });
+  assert.equal((await api('POST', '/api/products', { name: 'Sans boutique', price: 1 })).body.store_id, null);
 });
