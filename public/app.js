@@ -85,6 +85,7 @@ const guard = (fn) => async (...args) => {
 // ---------- layout & routing ----------
 const NAV = [
   ['#/', 'لوحة التحكم'],
+  ['#/stats', 'الإحصائيات'],
   ['#/orders', 'تأكيد الطلبيات'],
   ['#/tracking', 'تتبع الطلبيات'],
   ['#/products', 'المنتجات'],
@@ -120,6 +121,7 @@ function shell(content) {
 
 const ROUTES = {
   '#/': dashboardPage,
+  '#/stats': statsPage,
   '#/orders': () => ordersPage('confirm'),
   '#/tracking': () => ordersPage('tracking'),
   '#/products': productsPage,
@@ -246,6 +248,161 @@ async function dashboardPage() {
       location.hash = `#/?from=${d}&to=${today()}`;
     };
   });
+}
+
+// ---------- statistics (Ecotrack style) ----------
+const CHART_COLORS = { green: '#22c55e', red: '#ef4444', orange: '#f59e0b', blue: '#3b82f6', grey: '#9ca3af', purple: '#8b5cf6' };
+
+// Ring chart: [{ label, value, color }].
+function donut(parts) {
+  const total = parts.reduce((a, p) => a + p.value, 0);
+  if (!total) return '<p class="muted">ما كاين والو في هاد الفترة</p>';
+  const r = 70, c = 2 * Math.PI * r;
+  let offset = 0;
+  const arcs = parts.filter((p) => p.value).map((p) => {
+    const len = (p.value / total) * c;
+    const arc = `<circle r="${r}" cx="100" cy="100" fill="none" stroke="${p.color}" stroke-width="36"
+      stroke-dasharray="${len} ${c - len}" stroke-dashoffset="${-offset}"><title>${esc(p.label)}: ${p.value}</title></circle>`;
+    offset += len;
+    return arc;
+  }).join('');
+  return `<div class="donut"><svg viewBox="0 0 200 200" style="transform:rotate(-90deg)">${arcs}</svg>
+    <div class="legend">${parts.map((p) => `<span><i style="background:${p.color}"></i>${esc(p.label)}: <b>${p.value}</b> (${Math.round((p.value / total) * 100)}%)</span>`).join('')}</div></div>`;
+}
+
+// Rate per day, 0 to 100%.
+function rateLine(days, label) {
+  const pts = days.filter((d) => d.rate != null);
+  if (pts.length < 2) return '<p class="muted">لازم زوج أيام على الأقل باش يخرج المنحنى</p>';
+  const W = 600, H = 220, L = 34, B = 30;
+  const x = (i) => L + (i * (W - L - 10)) / (pts.length - 1);
+  const y = (v) => 10 + ((100 - v) * (H - B - 10)) / 100;
+  const grid = [0, 25, 50, 75, 100].map((v) => `<line x1="${L}" x2="${W - 10}" y1="${y(v)}" y2="${y(v)}" stroke="#ddd"/><text x="${L - 4}" y="${y(v) + 4}" font-size="10" text-anchor="end">${v}%</text>`).join('');
+  const step = Math.ceil(pts.length / 8);
+  const labels = pts.map((d, i) => (i % step ? '' : `<text x="${x(i)}" y="${H - 10}" font-size="10" text-anchor="middle">${String(d.day).slice(5, 10)}</text>`)).join('');
+  const line = pts.map((d, i) => `${x(i)},${y(d.rate)}`).join(' ');
+  const dots = pts.map((d, i) => `<circle cx="${x(i)}" cy="${y(d.rate)}" r="3" fill="${CHART_COLORS.green}"><title>${String(d.day).slice(0, 10)}: ${d.rate}%</title></circle>`).join('');
+  return `<div class="muted">${esc(label)}</div><svg viewBox="0 0 ${W} ${H}" class="line-chart" dir="ltr">${grid}${labels}
+    <polyline points="${line}" fill="none" stroke="${CHART_COLORS.green}" stroke-width="2.5"/>${dots}</svg>`;
+}
+
+const statCard = (label, value, cls = '') => `<div class="stat-card ${cls}"><div class="l">${esc(label)}</div><div class="v">${value}</div></div>`;
+const rateBar = (rate) => `<div class="rate-bar"><div style="width:${rate ?? 0}%"></div><span>${pct(rate)}</span></div>`;
+
+const PERIODS = [['all', 'كل الوقت'], ['today', 'اليوم'], ['yesterday', 'البارح'], ['week', 'أسبوع'], ['month', 'شهر']];
+function periodRange(period) {
+  // Days in Algeria time, like the server counts them.
+  const day = (n) => new Date(Date.now() - n * 86400_000).toLocaleDateString('en-CA', { timeZone: 'Africa/Algiers' });
+  return { today: [day(0), day(0)], yesterday: [day(1), day(1)], week: [day(6), day(0)], month: [day(29), day(0)] }[period] || ['', ''];
+}
+
+async function statsPage() {
+  const q = Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || ''));
+  const tab = q.tab === 'delivery' ? 'delivery' : 'confirmation';
+  const period = q.period || (q.from || q.to ? 'custom' : 'month');
+  const [from, to] = period === 'custom' ? [q.from || '', q.to || ''] : periodRange(period);
+  const filters = { from, to, store_id: q.store_id || '', product_id: q.product_id || '', user_id: q.user_id || '' };
+  const [s, stores, products] = await Promise.all([
+    api('GET', `/stats/${tab}?${new URLSearchParams(filters)}`), api('GET', '/stores'), api('GET', '/products'),
+  ]);
+  const go = (patch) => {
+    const next = { tab, period, ...filters, ...patch };
+    if (next.period !== 'custom') delete next.from, delete next.to;
+    location.hash = `#/stats?${new URLSearchParams(Object.entries(next).filter(([, v]) => v))}`;
+  };
+  const options = (list, selected, empty) => `<option value="">${empty}</option>${list.map((x) =>
+    `<option value="${x.id}" ${String(x.id) === String(selected) ? 'selected' : ''}>${esc(x.name || x.username)}</option>`).join('')}`;
+  const team = tab === 'confirmation' ? s.team : [];
+
+  const body = tab === 'confirmation' ? `
+    <div class="card">
+      <h3 class="card-title">إحصائيات التأكيد</h3>
+      <div class="stat-cards">
+        ${statCard('المؤكدة', s.confirmed, 'green')}
+        ${statCard('الملغاة', s.cancelled, 'red')}
+        ${statCard('الفاشلة (ما ردش)', s.failed, 'orange')}
+        ${statCard('المعلقة (جديدة)', s.pending, 'blue')}
+        ${statCard('مؤجلة', s.postponed, 'purple')}
+        ${statCard('مكررة', s.duplicates, 'grey')}
+      </div>
+      <div class="muted">نسبة التأكيد (المؤكدة ÷ المؤكدة + الملغاة) من ${s.orders} طلبية</div>
+      ${rateBar(s.rate)}
+      <div class="stats-grid">
+        <div class="card">${donut([
+          { label: 'المؤكدة', value: s.confirmed, color: CHART_COLORS.green },
+          { label: 'الملغاة', value: s.cancelled, color: CHART_COLORS.red },
+          { label: 'الفاشلة', value: s.failed, color: CHART_COLORS.orange },
+          { label: 'المعلقة', value: s.pending, color: CHART_COLORS.blue },
+          { label: 'مؤجلة', value: s.postponed, color: CHART_COLORS.purple },
+        ])}</div>
+        <div class="card">${rateLine(s.daily, 'نسبة التأكيد في كل يوم')}</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="card-title">إحصائيات فريق التأكيد</h3>
+      <div class="team-grid">${s.team.map((t) => `<div class="team-card">
+        <b>${esc(t.username)}</b>
+        <div>المؤكدة <b>${t.confirmed}</b></div><div>الملغاة <b>${t.cancelled}</b></div>
+        <div>الفاشلة <b>${t.failed}</b></div><div>مؤجلة <b>${t.postponed}</b></div>
+        ${rateBar(t.rate)}</div>`).join('') || '<p class="muted">مازال حتى واحد ما أكد في هاد الفترة</p>'}</div>
+    </div>
+    <div class="card"><h3 class="card-title">حسب المنتج</h3><div class="table-wrap"><table>
+      <tr><th>المنتج</th><th>طلبيات</th><th>المؤكدة</th><th>الملغاة</th><th>نسبة التأكيد</th></tr>
+      ${s.products.map((p) => `<tr><td>${esc(p.name)}</td><td class="num">${p.orders}</td><td class="num">${p.confirmed}</td><td class="num">${p.cancelled}</td><td class="num">${pct(p.rate)}</td></tr>`).join('')}
+    </table></div></div>` : `
+    <div class="card">
+      <h3 class="card-title">إحصائيات التوصيل</h3>
+      <div class="stat-cards">
+        ${statCard('مؤكدة ما تبعثتش', s.waiting, 'blue')}
+        ${statCard('عند شركة التوصيل', s.at_company, 'orange')}
+        ${statCard('en livraison', s.out_for_delivery, 'purple')}
+        ${statCard('تليفرات', s.delivered, 'green')}
+        ${statCard('روتور في الطريق', s.returning, 'red')}
+        ${statCard('روتور وصل', s.returned_back, 'grey')}
+      </div>
+      <div class="muted">نسبة التوصيل (تليفرات ÷ تليفرات + روتور) من ${s.shipped} طرد · المبيعات ${money(s.revenue)}</div>
+      ${rateBar(s.rate)}
+      <div class="stats-grid">
+        <div class="card">${donut([
+          { label: 'تليفرات', value: s.delivered, color: CHART_COLORS.green },
+          { label: 'روتور', value: s.returned, color: CHART_COLORS.red },
+          { label: 'عند الشركة', value: s.at_company, color: CHART_COLORS.orange },
+          { label: 'en livraison', value: s.out_for_delivery, color: CHART_COLORS.purple },
+        ])}</div>
+        <div class="card">${rateLine(s.daily, 'نسبة التوصيل حسب نهار الإرسال')}</div>
+      </div>
+    </div>
+    ${[['حسب شركة التوصيل', s.companies, (x) => esc(x.name || 'بلا شركة')], ['حسب المنتج', s.products, (x) => esc(x.name)], ['حسب الولاية', s.wilayas, (x) => wilaya(x.key)]]
+      .map(([title, rows, name]) => `<div class="card"><h3 class="card-title">${title}</h3><div class="table-wrap"><table>
+      <tr><th></th><th>طرود</th><th>عند التوصيل</th><th>تليفرات</th><th>روتور</th><th>نسبة التوصيل</th></tr>
+      ${rows.map((x) => `<tr><td>${name(x)}</td><td class="num">${x.shipped}</td><td class="num">${x.in_progress}</td><td class="num">${x.delivered}</td><td class="num">${x.returned}</td><td class="num">${pct(x.rate)}</td></tr>`).join('')}
+    </table></div></div>`).join('')}`;
+
+  const main = shell(`
+    <div class="tabs stats-tabs">
+      <a class="tab ${tab === 'confirmation' ? 'active' : ''}" data-tab="confirmation">إحصائيات التأكيد</a>
+      <a class="tab ${tab === 'delivery' ? 'active' : ''}" data-tab="delivery">إحصائيات التوصيل</a>
+    </div>
+    <div class="bar stats-filters">
+      <label>البوتيك<select id="f-store">${options(stores, filters.store_id, 'كل البوتيكات')}</select></label>
+      <label>المنتج<select id="f-product">${options(products.filter((p) => !filters.store_id || String(p.store_id) === filters.store_id), filters.product_id, 'كل المنتجات')}</select></label>
+      ${tab === 'confirmation' ? `<label>العامل<select id="f-user">${options(team.length || !filters.user_id ? team : [{ id: filters.user_id, username: '…' }], filters.user_id, 'كل العمال')}</select></label>` : ''}
+      ${PERIODS.map(([k, l]) => `<button class="btn small ${period === k ? 'primary' : ''}" data-period="${k}">${l}</button>`).join('')}
+      <label>من<input type="date" id="f-from" value="${esc(from)}"></label>
+      <label>إلى<input type="date" id="f-to" value="${esc(to)}"></label>
+      <button class="btn small" id="f-reset">إعادة الضبط</button>
+    </div>
+    ${body}`);
+  main.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => go({ tab: b.dataset.tab, user_id: '' })));
+  main.querySelectorAll('[data-period]').forEach((b) => (b.onclick = () => go({ period: b.dataset.period })));
+  main.querySelector('#f-store').onchange = (e) => go({ store_id: e.target.value, product_id: '' });
+  main.querySelector('#f-product').onchange = (e) => go({ product_id: e.target.value });
+  const user = main.querySelector('#f-user');
+  if (user) user.onchange = (e) => go({ user_id: e.target.value });
+  const dates = () => go({ period: 'custom', from: main.querySelector('#f-from').value, to: main.querySelector('#f-to').value });
+  main.querySelector('#f-from').onchange = dates;
+  main.querySelector('#f-to').onchange = dates;
+  main.querySelector('#f-reset').onclick = () => (location.hash = `#/stats?tab=${tab}`);
 }
 
 // ---------- orders ----------

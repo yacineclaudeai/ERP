@@ -246,3 +246,28 @@ a { color: #0b4f22; font-weight: 800; }
 .kpi .v.pos, .kpi .v.neg { color: #000; }
 .kpi .v.neg::before { content: "▼ "; }
 .btn, .tab { font-weight: 800; }
+
+/* Statistics pages (Ecotrack style) */
+.stats-tabs { justify-content: center; }
+.stats-filters { flex-wrap: wrap; align-items: end; gap: 8px; }
+.card-title { margin: 0 0 12px; display: inline-block; background: var(--brand); color: #000; padding: 4px 14px; border-radius: 20px; font-weight: 800; }
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.stat-card { background: #fff; border: 2px solid var(--brand-dark); border-radius: 12px; padding: 12px; border-right-width: 8px; }
+.stat-card .l { font-weight: 700; color: #000; }
+.stat-card .v { font-size: 26px; font-weight: 800; color: #000; }
+.stat-card.green { border-right-color: #22c55e; } .stat-card.red { border-right-color: #ef4444; }
+.stat-card.orange { border-right-color: #f59e0b; } .stat-card.blue { border-right-color: #3b82f6; }
+.stat-card.purple { border-right-color: #8b5cf6; } .stat-card.grey { border-right-color: #9ca3af; }
+.rate-bar { position: relative; height: 22px; background: #e5e7eb; border-radius: 11px; overflow: hidden; margin: 6px 0 14px; border: 1px solid #000; }
+.rate-bar div { height: 100%; background: #22c55e; }
+.rate-bar span { position: absolute; inset: 0; text-align: center; font-weight: 800; line-height: 20px; color: #000; }
+.stats-grid { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(300px, 1.6fr); gap: 12px; }
+@media (max-width: 800px) { .stats-grid { grid-template-columns: 1fr; } }
+.donut { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.donut svg { width: 220px; height: 220px; }
+.donut .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; justify-content: center; font-weight: 600; }
+.donut .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-left: 4px; vertical-align: middle; }
+.line-chart { width: 100%; height: auto; background: #fff; }
+.team-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.team-card { background: #fff; border: 2px solid var(--brand-dark); border-radius: 12px; padding: 10px; display: grid; gap: 4px; }
+.team-card > div:not(.rate-bar) { display: flex; justify-content: space-between; }

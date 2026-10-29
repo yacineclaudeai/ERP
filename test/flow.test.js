@@ -563,3 +563,32 @@ test('new products start in the TEST store with the TEST company, until moved', 
   await api('PUT', '/api/stores/new-products', { store_id: '' });
   assert.equal((await api('POST', '/api/products', { name: 'Sans boutique', price: 1 })).body.store_id, null);
 });
+
+test('statistics pages: confirmation and delivery, filtered by store', async () => {
+  const sb = (await api('POST', '/api/delivery/companies', { name: 'Stats Express', provider: 'sandbox' })).body;
+  const store = (await api('POST', '/api/stores', { name: 'BOUTIQUE STATS', company_id: sb.id })).body;
+  const p = (await api('POST', '/api/products', { name: 'Stats item', price: 1000, stock: 20, store_id: store.id })).body;
+  const mk = async (phone) => (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'S', phone, wilaya_code: 16 })).body;
+  const orders = [];
+  for (let i = 0; i < 5; i += 1) orders.push(await mk(`055144010${i}`));
+  await api('POST', `/api/orders/${orders[0].id}/action`, { action: 'confirm' });
+  await api('POST', `/api/orders/${orders[1].id}/action`, { action: 'confirm' });
+  await api('POST', `/api/orders/${orders[2].id}/action`, { action: 'cancel' });
+  await api('POST', `/api/orders/${orders[3].id}/action`, { action: 'no_answer' });
+  await api('POST', `/api/orders/${orders[0].id}/action`, { action: 'delivered' });
+  await api('POST', `/api/orders/${orders[1].id}/action`, { action: 'returned' });
+
+  const c = (await api('GET', `/api/stats/confirmation?store_id=${store.id}`)).body;
+  assert.deepEqual([c.orders, c.confirmed, c.cancelled, c.failed, c.pending], [5, 2, 1, 1, 1]);
+  assert.equal(c.rate, 66.7);
+  assert.equal(c.team[0].username, 'admin');
+  assert.equal(c.team[0].confirmed, 2);
+
+  const d = (await api('GET', `/api/stats/delivery?store_id=${store.id}`)).body;
+  assert.deepEqual([d.shipped, d.delivered, d.returning, d.rate], [2, 1, 1, 50]);
+  assert.equal(d.companies[0].name, 'Stats Express');
+
+  const other = (await api('GET', '/api/stats/confirmation?store_id=999999')).body;
+  assert.equal(other.orders, 0);
+  assert.equal((await api('GET', '/api/stats/other')).status, 404);
+});

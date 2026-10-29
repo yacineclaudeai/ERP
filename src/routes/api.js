@@ -8,7 +8,7 @@ import {
   STATUSES, HttpError, getOrder, createOrder, updateOrder, applyAction,
   confirmAndDispatch, dispatchOrder, backToConfirmation, syncTracking, rerouteProductOrders, deleteOrder,
 } from '../services/orders.js';
-import { getStats, localDay } from '../services/stats.js';
+import { getStats, localDay, getConfirmationStats, getDeliveryStats } from '../services/stats.js';
 import {
   getAccounting, saveDefaults, saveProductCosts, addExpense, deleteExpense, addPurchase, deletePurchase,
 } from '../services/accounting.js';
@@ -478,6 +478,17 @@ export function apiRouter(db) {
     const { from, to } = c.req.query();
     const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
     return c.json(await getStats(db, { from: isDate(from) ? from : null, to: isDate(to) ? to : null }));
+  });
+
+  r.get('/stats/:tab{confirmation|delivery}', async (c) => {
+    const q = c.req.query();
+    const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+    const id = (v) => (Number(v) > 0 ? Number(v) : null);
+    const filters = {
+      from: isDate(q.from) ? q.from : null, to: isDate(q.to) ? q.to : null,
+      store_id: id(q.store_id), product_id: id(q.product_id), user_id: id(q.user_id),
+    };
+    return c.json(c.req.param('tab') === 'confirmation' ? await getConfirmationStats(db, filters) : await getDeliveryStats(db, filters));
   });
 
   // ---- accounting (profit of each product) ----
