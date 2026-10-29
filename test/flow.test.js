@@ -431,3 +431,13 @@ test('a confirmed or sent order goes back to confirmation; a sent parcel is remo
     await api('PUT', '/api/delivery/routes', { auto_dispatch: true });
   }
 });
+
+test('LightFunnels products missing from the ERP were added, existing ones left as they were', async () => {
+  const products = (await api('GET', '/api/products')).body;
+  const added = products.find((p) => p.name === 'peignoir femme importation avec brodé');
+  assert.equal(added.price, 2500);
+  assert.equal(added.store_id, null);
+  const existing = products.find((p) => p.name === 'Robe très classe ✨');
+  assert.equal(existing.price, 0);
+  assert.equal(products.filter((p) => p.name === 'Pyjama stitch cute').length, 1);
+});
