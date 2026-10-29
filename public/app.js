@@ -739,11 +739,12 @@ async function linkStoresDialog(stores) {
 async function productsPage() {
   const [products, stores, companies] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies')]);
   const isAdmin = state.user.role === 'admin';
-  const select = (field, list, selected, empty) => `<select class="cell" data-product-field="${field}"><option value="">${empty}</option>
+  const select = (field, list, selected, empty) => `<select class="cell" data-product-field="${field}" data-orig="${selected ?? ''}"><option value="">${empty}</option>
     ${list.map((x) => `<option value="${x.id}" ${x.id === selected ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
   const main = shell(`
     <h2>المنتجات</h2>
     ${isAdmin ? `<div class="bar"><button class="btn primary" id="add">+ منتج جديد</button>
+      <button class="btn primary hidden" id="save-all"></button>
       <button class="btn" id="link-stores" title="يقرا الطرود اللي بعثها كل فرع عند شركة التوصيل تاعو، ويعرف منها كل منتج لأنهي فرع">ربط المنتجات بالفروع تلقائياً</button></div>` : ''}
     <div class="table-wrap"><table>
       <tr><th>المنتج</th><th>البوتيك</th><th>شركة التوصيل</th><th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
@@ -757,19 +758,47 @@ async function productsPage() {
         <td>${p.landing_url ? `<a href="${esc(p.landing_url)}" target="_blank" rel="noopener">فتح</a>` : '<span class="muted">—</span>'}</td>
         <td class="num">${p.orders_count} <span class="muted">(${p.pending_count} للتأكيد)</span></td>
         <td class="actions">
+          <span class="save-box hidden"><button class="btn small primary" data-save>حفظ</button>
+            <button class="btn small" data-cancel>إلغاء</button></span>
           <button class="btn small" data-embed="${p.id}">ربط صفحة الهبوط</button>
           ${isAdmin ? `<button class="btn small" data-edit="${p.id}">تعديل</button>
           <button class="btn small" data-stock="${p.id}">المخزون</button>` : ''}
         </td></tr>`).join('')}
     </table></div>`);
 
-  // Store and delivery company save right away; the product's open orders follow.
-  main.querySelectorAll('[data-product-field]').forEach((el) => (el.onchange = guard(async () => {
-    const id = el.closest('tr').dataset.product;
-    const r = await api('PUT', `/products/${id}/store`, { [el.dataset.productField]: el.value || null });
-    toast(r.orders ? `تم الحفظ، ${r.orders} طلبية تبعتو` : 'تم الحفظ');
+  // Store and delivery company are saved with the "حفظ" button of the row (or
+  // "حفظ الكل"); the product's open orders follow the new store and company.
+  const changed = (tr) => [...tr.querySelectorAll('[data-product-field]')].filter((el) => el.value !== el.dataset.orig);
+  const saveAll = main.querySelector('#save-all');
+  const refresh = () => {
+    let n = 0;
+    main.querySelectorAll('tr[data-product]').forEach((tr) => {
+      const dirty = changed(tr).length > 0;
+      if (dirty) n += 1;
+      tr.classList.toggle('dirty', dirty);
+      tr.querySelector('.save-box')?.classList.toggle('hidden', !dirty);
+    });
+    if (saveAll) {
+      saveAll.classList.toggle('hidden', !n);
+      saveAll.textContent = `حفظ الكل (${n})`;
+    }
+  };
+  const saveRows = async (rows) => {
+    let orders = 0;
+    for (const tr of rows) {
+      const body = Object.fromEntries(changed(tr).map((el) => [el.dataset.productField, el.value || null]));
+      orders += (await api('PUT', `/products/${tr.dataset.product}/store`, body)).orders || 0;
+    }
+    toast(orders ? `تم الحفظ، ${orders} طلبية تبعتو` : 'تم الحفظ');
     router();
-  })));
+  };
+  main.querySelectorAll('[data-product-field]').forEach((el) => (el.onchange = refresh));
+  main.querySelectorAll('[data-save]').forEach((b) => (b.onclick = guard(() => saveRows([b.closest('tr')]))));
+  main.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = () => {
+    changed(b.closest('tr')).forEach((el) => { el.value = el.dataset.orig; });
+    refresh();
+  }));
+  if (saveAll) saveAll.onclick = guard(() => saveRows([...main.querySelectorAll('tr.dirty')]));
   const byId = (id) => products.find((p) => p.id === Number(id));
   const add = main.querySelector('#add');
   if (add) add.onclick = () => productForm(null, stores);

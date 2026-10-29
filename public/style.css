@@ -168,3 +168,7 @@ td.acts button.dark .ic { width: 13px; height: 13px; }
 .bulk select { width: auto; }
 .top-scroll { overflow-x: auto; overflow-y: hidden; height: 14px; margin-bottom: 4px; }
 .top-scroll > div { height: 1px; }
+
+/* Products page: a row with unsaved store/company changes */
+tr.dirty td { background: #fef9c3; }
+.save-box { display: inline-flex; gap: 4px; }
