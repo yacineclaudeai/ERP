@@ -184,3 +184,65 @@ tr.dirty td { background: #fef9c3; }
 /* Products page: store and company selects wide enough to read */
 select[data-product-field] { min-width: 150px; width: auto; }
 td.actions { white-space: normal; }
+
+/* ---- Theme v2: strong green and red backgrounds, black bold text ---- */
+:root {
+  --bg: #bbf7d0;
+  --text: #000;
+  --muted: #111;
+  --line: #15803d;
+  --brand: #16a34a;
+  --brand-dark: #15803d;
+  --brand-soft: #4ade80;
+  --red: #e53935;
+  --red-soft: #fecaca;
+  --danger: #b71c1c;
+}
+body { color: #000; font-weight: 700; }
+label { color: #000; font-weight: 700; }
+.muted { color: #111; font-weight: 600; }
+input, select, textarea { border: 2px solid var(--brand-dark); color: #000; font-weight: 600; }
+.btn { border: 2px solid var(--brand-dark); color: #000; }
+.btn:hover { background: var(--red-soft); border-color: var(--red); }
+.btn.primary { background: var(--brand); color: #000; border-color: var(--brand-dark); }
+.btn.primary:hover { background: #4ade80; border-color: var(--brand-dark); }
+.btn.danger { background: var(--red); color: #000; border-color: #b71c1c; }
+.btn.danger:hover { background: #ef5350; }
+
+.side { background: var(--red); color: #000; border-left: 0; }
+.side h1 { color: #000; font-weight: 800; }
+.side h1::after { background: var(--brand); border: 2px solid #000; width: 10px; height: 10px; }
+.side a { color: #000; font-weight: 800; }
+.side a:hover { background: rgba(255, 255, 255, .35); color: #000; }
+.side a.active { background: var(--brand); color: #000; border-right-color: #000; }
+.side .who { color: #000; font-weight: 700; }
+
+.main h2 { color: #000; background: var(--brand); display: inline-block; padding: 6px 20px; border-radius: 12px; border: 2px solid var(--brand-dark); font-weight: 800; }
+.card, .table-wrap { border: 2px solid var(--brand-dark); }
+.kpi { border: 2px solid var(--brand-dark); border-top-width: 2px; }
+.kpi:nth-child(odd) { background: #4ade80; }
+.kpi:nth-child(even) { background: #f87171; }
+.kpi .l { color: #000; font-weight: 700; }
+.kpi .v { font-weight: 800; }
+
+th { background: var(--red); color: #000; font-weight: 800; border-bottom: 2px solid var(--brand-dark); }
+table:not(.orders) tbody tr:nth-child(even) td, table:not(.orders) tr:nth-child(even) td { background: #dcfce7; }
+table:not(.orders) tr:nth-child(odd) td { background: #fff; }
+tr.dirty td { background: #fef08a !important; }
+table.orders thead th { background: var(--brand); color: #000; border-left: 1px solid var(--brand-dark); font-weight: 800; }
+table.orders th.hf select { color: #000; background: transparent; font-weight: 800; }
+table.orders th.hf select option { background: #fff; color: #000; }
+
+.tab { background: #fff; border: 2px solid var(--brand-dark); color: #000; font-weight: 700; }
+.tab.active { background: var(--red); color: #000; border-color: #b71c1c; }
+.pager .page-n, .page-n { color: #000; }
+.modal-box { border-top: 8px solid var(--red); border-bottom: 8px solid var(--brand); }
+.toast { color: #000; background: var(--brand); border: 2px solid #000; font-weight: 800; }
+.toast.err { background: var(--red); }
+.login { background: #fff; border: 2px solid var(--brand-dark); }
+a { color: #0b4f22; font-weight: 800; }
+.badge { border: 1px solid #000; }
+.alert { border: 2px solid #b71c1c; color: #000; background: var(--red-soft); }
+.kpi .v.pos, .kpi .v.neg { color: #000; }
+.kpi .v.neg::before { content: "▼ "; }
+.btn, .tab { font-weight: 800; }
