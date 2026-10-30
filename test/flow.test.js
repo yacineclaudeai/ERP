@@ -952,6 +952,36 @@ test('LightFunnels checkouts: unfinished ones become abandoned orders, finished 
   // A checkout arriving after the real order is ignored.
   await send('checkout', checkout({ id: 'checkout_2', _id: 7003 }));
   assert.equal((await api('GET', '/api/orders?q=0551990044')).body.total, 1);
+
+  // The real webhook only carries the checkout id: the details are read back from the API.
+  await db.run("UPDATE lightfunnels_links SET access_token = 'tok', expires_at = now() + interval '1 hour' WHERE id = ?", link.id);
+  const kinds = {
+    Checkout: { id: 'ID', full_name: 'String', phone: 'String', shipping_address: 'Address', items: 'Line' },
+    Address: { state: 'String', city: 'String' },
+    Line: { title: 'String', price: 'Float', quantity: 'Int' },
+  };
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).startsWith('https://services.lightfunnels.com')) return real(url, init);
+    const { query, variables } = JSON.parse(init.body);
+    if (query.includes('__schema')) {
+      return Response.json({ data: { __schema: { queryType: { fields: [{ name: 'checkout', args: [{ name: 'id', type: { name: null, kind: 'NON_NULL', ofType: { name: 'ID', kind: 'SCALAR' } } }], type: { name: 'Checkout', kind: 'OBJECT' } }] } } } });
+    }
+    if (query.includes('__type')) {
+      const fields = Object.entries(kinds[variables.n]).map(([name, t]) => ({ name, type: { name: t, kind: kinds[t] ? 'OBJECT' : 'SCALAR', ofType: null } }));
+      return Response.json({ data: { __type: { fields } } });
+    }
+    assert.match(query, /checkout\(id: \$id\)/);
+    return Response.json({ data: { r: { id: variables.id, full_name: 'Only Id', phone: '0551990055',
+      shipping_address: { state: 'Oran', city: 'Oran' }, items: [{ title: 'LF Checkout Item', price: 1800, quantity: 1 }] } } });
+  };
+  try {
+    await send('checkout', { id: 'ch_only_id' });
+    found = (await api('GET', '/api/orders?q=0551990055')).body.rows;
+    assert.deepEqual(found.map((o) => [o.source, o.customer_name]), [['abandoned', 'Only Id']]);
+  } finally {
+    globalThis.fetch = real;
+  }
   delete process.env.LF_CLIENT_ID;
   delete process.env.LF_CLIENT_SECRET;
 });

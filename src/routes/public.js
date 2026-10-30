@@ -68,11 +68,13 @@ export function publicRouter(db) {
       const payload = JSON.parse(raw);
       node = payload.node ?? payload;
       const result = topic === 'checkout' ? await lf.handleCheckoutEvent(db, link, node) : await lf.handleOrderEvent(db, link, topic, node);
-      await lf.recordEvent(db, link, topic, node, result.ignored ? 'ignored' : result.duplicate ? 'duplicate' : 'imported', typeof result.ignored === 'string' ? result.ignored : null, result.order_id);
+      if (result.ignored && topic === 'checkout') console.log('lightfunnels checkout ignored:', result.ignored, JSON.stringify(result.node ?? node).slice(0, 1500));
+      await lf.recordEvent(db, link, topic, result.node ?? node, result.ignored ? 'ignored' : result.duplicate ? 'duplicate' : 'imported', typeof result.ignored === 'string' ? result.ignored : null, result.order_id);
       return c.json({ ok: true });
     } catch (e) {
       if (!(e instanceof HttpError) && !(e instanceof SyntaxError)) throw e;
       // An order we can't read is kept with the reason; answering 200 stops LightFunnels from retrying it.
+      if (topic === 'checkout') console.log('lightfunnels checkout error:', e.message, JSON.stringify(node).slice(0, 1500));
       await lf.recordEvent(db, link, topic, node, 'error', e.message);
       return c.json({ ok: false, error: e.message });
     }
