@@ -749,6 +749,9 @@ test('orders are given to agents; failed twice, they go to the next agent (still
   assert.equal((await api('GET', '/api/orders?status=failed_1')).body.total, 0);
   await api('POST', `/api/orders/${o1.id}/action`, { action: 'no_answer' });
   assert.equal((await api('GET', '/api/orders?status=failed_3')).body.total, 1, 'الفاشلة 3 stays with amina');
+  await api('POST', `/api/orders/${o1.id}/action`, { action: 'set_failed', attempts: 1 });
+  assert.equal((await api('GET', `/api/orders/${o1.id}`)).body.call_attempts, 1, 'back to الفاشلة 1');
+  assert.equal((await api('POST', `/api/orders/${o1.id}/action`, { action: 'set_failed', attempts: 9 })).status, 400);
 
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
   const team = (await api('GET', '/api/stats/confirmation')).body.team;

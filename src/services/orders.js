@@ -222,13 +222,22 @@ export async function updateOrder(db, id, input, userId = null) {
 
 // Confirmation-team actions. Returns the updated order; confirming also
 // triggers the automatic dispatch (see confirmAndDispatch).
-export async function applyAction(db, id, action, { userId = null, note = null } = {}) {
+export async function applyAction(db, id, action, { userId = null, note = null, attempts = null } = {}) {
   return db.tx(async (t) => {
     const order = await getOrder(t, id, { lock: true });
     const set = (status, extra = '') =>
       t.run(`UPDATE orders SET status = ?, updated_at = now()${extra} WHERE id = ?`, status, id);
 
     switch (action) {
+      // Fix the failed number by hand (a "+1" pressed by mistake): الفاشلة 3 back to 1.
+      case 'set_failed': {
+        const n = Number(attempts);
+        if (order.status !== 'no_answer') throw new HttpError(409, 'الحالة لا تسمح');
+        if (!Number.isInteger(n) || n < 1 || n > 5) throw new HttpError(400, 'رقم الفاشلة من 1 حتى 5');
+        await t.run('UPDATE orders SET call_attempts = ?, updated_at = now() WHERE id = ?', n, id);
+        await logEvent(t, id, 'edited', `الفاشلة ${order.call_attempts} ← الفاشلة ${n}`, userId);
+        break;
+      }
       case 'no_answer': {
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await t.run(`UPDATE orders SET status = 'no_answer', call_attempts = call_attempts + 1,

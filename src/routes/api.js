@@ -313,7 +313,7 @@ export function apiRouter(db) {
     if (!can(c.get('user'), TRACKING_ACTIONS.includes(String(b.action)) ? 'tracking' : 'confirm')) {
       throw new HttpError(403, 'ما عندكش الصلاحية');
     }
-    const opts = { userId: c.get('user').id, note: b.note || null };
+    const opts = { userId: c.get('user').id, note: b.note || null, attempts: b.attempts ?? null };
     return c.json(b.action === 'confirm'
       ? await confirmAndDispatch(db, id, opts)
       : await applyAction(db, id, String(b.action), opts));

@@ -640,10 +640,14 @@ function statusCell(o) {
   if (o.status === 'returned') return `<span class="pill returned">${o.return_received_at ? 'روتور (وصل)' : 'روتور (في الطريق)'}</span>`;
   if (!moves) return `<span class="pill ${o.status}">${STATUS_LABELS[o.status] || o.status}</span>`;
   const opts = [o.status, ...moves.filter((s) => s !== o.status)];
-  const label = (s) => (s !== 'no_answer' ? STATUS_LABELS[s]
-    : s === o.status ? failedLabel(o) : `الفاشلة ${(o.call_attempts || 0) + 1}`);
-  return `<select class="pill ${o.status}" data-move>${opts.map((s) =>
-    `<option value="${s}" ${s === o.status ? 'selected' : ''}>${label(s)}</option>`).join('')}</select>`;
+  const label = (s) => (s === 'no_answer' ? `الفاشلة ${(o.call_attempts || 0) + 1}` : STATUS_LABELS[s]);
+  // A failed order can also go back to a lower failed number (pressed by mistake).
+  const now = Math.min(5, Math.max(1, o.call_attempts || 0));
+  const failed = o.status === 'no_answer' ? FAILED.map(([k, l], i) => [k, l, i + 1 === now]) : [];
+  return `<select class="pill ${o.status}" data-move>
+    ${failed.map(([k, l, sel]) => `<option value="${k}" ${sel ? 'selected' : ''}>${l}</option>`).join('')}
+    ${opts.filter((s) => !(failed.length && s === 'no_answer')).map((s) =>
+    `<option value="${s}" ${s === o.status && !failed.length ? 'selected' : ''}>${label(s)}</option>`).join('')}</select>`;
 }
 
 function orderRow(o, products, companies, stores) {
@@ -745,6 +749,9 @@ function bindOrderTable(table, rows, products, companies, stores) {
       })();
     }
     if (el.matches('[data-move]')) {
+      if (el.value.startsWith('failed_')) {
+        return save(tr, (id) => api('POST', `/orders/${id}/action`, { action: 'set_failed', attempts: Number(el.value.slice(7)) }));
+      }
       const action = moveAction(byId.get(Number(tr.dataset.id)).status, el.value);
       if (action === 'cancel' && !confirm('تأكيد إلغاء الطلبية؟')) return redraw(tr, byId.get(Number(tr.dataset.id)));
       return save(tr, (id) => api('POST', `/orders/${id}/action`, { action }));
