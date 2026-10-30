@@ -102,7 +102,8 @@ const OUT_FOR_DELIVERY = /en.?livraison|sortie|out.?for|vers.?client|chez.?livre
 
 const round = (n) => Math.round(n * 100) / 100;
 
-export async function getAccounting(db) {
+// storeIds: only the products of these stores (an accountant limited to some stores).
+export async function getAccounting(db, { storeIds = null } = {}) {
   const defaults = await getDefaults(db);
   const rows = await db.all(`
     SELECT p.id, p.name, p.cost, p.stock, p.store_id, s.name AS store_name,
@@ -134,7 +135,7 @@ export async function getAccounting(db) {
   const byProduct = new Map();
   for (const e of expenses) (byProduct.get(e.product_id) || byProduct.set(e.product_id, []).get(e.product_id)).push(e);
 
-  const products = rows.map((p) => {
+  const products = rows.filter((p) => !storeIds?.length || storeIds.includes(p.store_id)).map((p) => {
     const c = costs.get(p.id) || {};
     const lines = [];
     const missing = [];

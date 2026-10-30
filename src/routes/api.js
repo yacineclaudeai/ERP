@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { Hono } from 'hono';
 import { getSetting, setSetting } from '../db.js';
 import {
-  hashPassword, verifyPassword, setSession, clearSession, authMiddleware, requireAdmin, requirePerm, can, publicUser, parsePermissions, PERMISSIONS,
+  hashPassword, verifyPassword, setSession, clearSession, authMiddleware, requireAdmin, requirePerm, can, publicUser, parsePermissions, parseIds, PERMISSIONS,
 } from '../auth.js';
 import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
@@ -525,32 +525,52 @@ export function apiRouter(db) {
   });
 
   // ---- accounting (profit of each product) ----
-  r.get('/accounting', requirePerm('accounting'), async (c) => c.json(await getAccounting(db)));
-  r.put('/accounting/defaults', requirePerm('accounting'), async (c) => c.json(await saveDefaults(db, body(c))));
-  r.put('/accounting/products/:id', requirePerm('accounting'), async (c) => {
+  // An accountant limited to some stores sees and changes only their products.
+  const accountingStores = (c) => c.get('user').accounting_store_ids || [];
+  const checkAccountingProduct = async (c, productId) => {
+    const stores = accountingStores(c);
+    if (!stores.length) return;
+    const p = await db.get('SELECT store_id FROM products WHERE id = ?', productId);
+    if (!p || !stores.includes(p.store_id)) throw new HttpError(403, 'هاد المنتج ماشي من البوتيكات تاعك');
+  };
+  const accountingProduct = async (c, next) => {
+    await checkAccountingProduct(c, idParam(c));
+    return next();
+  };
+  r.get('/accounting', requirePerm('accounting'), async (c) => c.json(await getAccounting(db, { storeIds: accountingStores(c) })));
+  r.put('/accounting/defaults', requirePerm('accounting'), async (c) => {
+    // The fixed values are shared by every store.
+    if (accountingStores(c).length) throw new HttpError(403, 'القيم الثابتة تاع كل البوتيكات، يبدلها غير اللي يشوف كل البوتيكات');
+    return c.json(await saveDefaults(db, body(c)));
+  });
+  r.put('/accounting/products/:id', requirePerm('accounting'), accountingProduct, async (c) => {
     await saveProductCosts(db, idParam(c), body(c));
     return c.json({ ok: true });
   });
-  r.post('/accounting/products/:id/expenses', requirePerm('accounting'), async (c) => {
+  r.post('/accounting/products/:id/expenses', requirePerm('accounting'), accountingProduct, async (c) => {
     await addExpense(db, idParam(c), body(c));
     return c.json({ ok: true }, 201);
   });
   r.delete('/accounting/expenses/:id', requirePerm('accounting'), async (c) => {
+    const e = await db.get('SELECT product_id FROM product_expenses WHERE id = ?', idParam(c));
+    if (e) await checkAccountingProduct(c, e.product_id);
     await deleteExpense(db, idParam(c));
     return c.json({ ok: true });
   });
-  r.post('/accounting/products/:id/purchases', requirePerm('accounting'), async (c) => {
+  r.post('/accounting/products/:id/purchases', requirePerm('accounting'), accountingProduct, async (c) => {
     await addPurchase(db, idParam(c), body(c));
     return c.json({ ok: true }, 201);
   });
   r.delete('/accounting/purchases/:id', requirePerm('accounting'), async (c) => {
+    const x = await db.get('SELECT product_id FROM product_purchases WHERE id = ?', idParam(c));
+    if (x) await checkAccountingProduct(c, x.product_id);
     await deletePurchase(db, idParam(c));
     return c.json({ ok: true });
   });
 
   // ---- users ----
   r.get('/users', requireAdmin, async (c) => c.json({
-    users: (await db.all('SELECT id, username, role, permissions, created_at FROM users ORDER BY id'))
+    users: (await db.all('SELECT id, username, role, permissions, accounting_store_ids, created_at FROM users ORDER BY id'))
       .map((u) => ({ ...publicUser(u), created_at: u.created_at })),
     permissions: PERMISSIONS,
   }));
@@ -564,7 +584,9 @@ export function apiRouter(db) {
     const permissions = parsePermissions(Array.isArray(b.permissions) ? b.permissions.join(',') : b.permissions).join(',');
     if (role === 'agent' && !permissions) throw new HttpError(400, 'اختار على الأقل صفحة وحدة يشوفها');
     if (await db.get('SELECT id FROM users WHERE username = ?', username)) throw new HttpError(409, 'هاد الاسم كاين من قبل');
-    await db.run('INSERT INTO users (username, password_hash, role, permissions) VALUES (?, ?, ?, ?)', username, hashPassword(password), role, permissions);
+    const storeIds = parseIds(Array.isArray(b.accounting_store_ids) ? b.accounting_store_ids.join(',') : b.accounting_store_ids).join(',') || null;
+    await db.run('INSERT INTO users (username, password_hash, role, permissions, accounting_store_ids) VALUES (?, ?, ?, ?, ?)',
+      username, hashPassword(password), role, permissions, storeIds);
     return c.json({ ok: true }, 201);
   });
 
@@ -585,7 +607,8 @@ export function apiRouter(db) {
     if (id === c.get('user').id && role !== 'admin') throw new HttpError(400, 'ما تقدرش تنحي المدير على روحك');
     const permissions = parsePermissions(Array.isArray(b.permissions) ? b.permissions.join(',') : b.permissions).join(',');
     if (role === 'agent' && !permissions) throw new HttpError(400, 'اختار على الأقل صفحة وحدة يشوفها');
-    await db.run('UPDATE users SET role = ?, permissions = ? WHERE id = ?', role, permissions, id);
+    const storeIds = parseIds(Array.isArray(b.accounting_store_ids) ? b.accounting_store_ids.join(',') : b.accounting_store_ids).join(',') || null;
+    await db.run('UPDATE users SET role = ?, permissions = ?, accounting_store_ids = ? WHERE id = ?', role, permissions, storeIds, id);
     return c.json({ ok: true });
   });
 

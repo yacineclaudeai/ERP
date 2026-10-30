@@ -951,7 +951,10 @@ const MODE_LABELS = { auto: 'أوتوماتيكي', default: 'ثابت', manual:
 const STATE_LABELS = { profit: 'ربح', selling: 'قيد البيع', loss: 'خسارة', none: '—' };
 
 async function accountingPage() {
-  const [a, stores] = await Promise.all([api('GET', '/accounting'), api('GET', '/stores')]);
+  const [a, allStores] = await Promise.all([api('GET', '/accounting'), api('GET', '/stores')]);
+  // An accountant limited to some stores sees only those.
+  const limited = state.user.accounting_store_ids || [];
+  const stores = limited.length ? allStores.filter((st) => limited.includes(st.id)) : allStores;
   const q = new URLSearchParams(location.hash.split('?')[1] || '');
   const storeId = q.get('store_id') || '';
   const picked = new Set((q.get('products') || '').split(',').filter(Boolean));
@@ -1028,7 +1031,7 @@ async function accountingPage() {
       <h3 style="margin-top:0">القيم الثابتة (لكل المنتجات)</h3>
       <form class="grid3" id="defaults">
         ${defaultFields.map(([k, l]) => `<label>${esc(l)}<input name="${k}" type="number" step="any" min="0" value="${a.defaults[k] ?? ''}" placeholder="فارغ = ما حطيتوش"></label>`).join('')}
-        <div class="actions" style="align-self:end"><button class="btn primary">حفظ القيم الثابتة</button></div>
+        <div class="actions" style="align-self:end">${limited.length ? '<span class="muted">يبدلها غير المدير</span>' : '<button class="btn primary">حفظ القيم الثابتة</button>'}</div>
       </form>
     </div>`);
   main.querySelector('#acc-store').onchange = (e) => goTo(e.target.value, []);
@@ -1653,27 +1656,46 @@ function permissionBoxes(perms, checked, disabled = false) {
 function bindPermissionForm(form) {
   const role = form.querySelector('[name=role]');
   const boxes = () => form.querySelectorAll('[name=perm]');
-  const sync = () => boxes().forEach((b) => { b.disabled = role.value === 'admin'; if (role.value === 'admin') b.checked = true; });
+  const storesBox = form.querySelector('.perm-stores');
+  // The stores list only matters for an accountant (profit page ticked, not admin).
+  const sync = () => {
+    boxes().forEach((b) => { b.disabled = role.value === 'admin'; if (role.value === 'admin') b.checked = true; });
+    const accounting = [...boxes()].some((b) => b.value === 'accounting' && b.checked);
+    storesBox.classList.toggle('hidden', role.value === 'admin' || !accounting);
+  };
+  form.addEventListener('change', (e) => { if (e.target.name === 'perm') sync(); });
   role.onchange = sync;
   form.querySelectorAll('[data-preset]').forEach((btn) => (btn.onclick = () => {
     role.value = 'agent';
     const keys = USER_PRESETS[Number(btn.dataset.preset)][1];
     boxes().forEach((b) => { b.disabled = false; b.checked = keys.includes(b.value); });
+    sync();
   }));
   sync();
-  return () => ({ role: role.value, permissions: [...boxes()].filter((b) => b.checked).map((b) => b.value) });
+  return () => {
+    const permissions = [...boxes()].filter((b) => b.checked).map((b) => b.value);
+    const stores = role.value === 'admin' || !permissions.includes('accounting') ? []
+      : [...form.querySelectorAll('[name=store]:checked')].map((b) => Number(b.value));
+    return { role: role.value, permissions, accounting_store_ids: stores };
+  };
 }
 
-function permissionFields(perms, user = { role: 'agent', permissions: [] }) {
+function permissionFields(perms, stores, user = { role: 'agent', permissions: [], accounting_store_ids: [] }) {
   return `<label>النوع<select name="role"><option value="agent" ${user.role !== 'admin' ? 'selected' : ''}>عامل (يشوف غير الصفحات المكوشية)</option>
       <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>مدير (يشوف كلش ويزيد المستخدمين)</option></select></label>
     <div class="bar">${USER_PRESETS.map(([l], i) => `<button class="btn small" type="button" data-preset="${i}">${esc(l)}</button>`).join('')}</div>
     <div class="muted">واش يقدر يشوف ويخدم:</div>
-    ${permissionBoxes(perms, user.role === 'admin' ? Object.keys(perms) : user.permissions)}`;
+    ${permissionBoxes(perms, user.role === 'admin' ? Object.keys(perms) : user.permissions)}
+    <div class="perm-stores card">
+      <div><b>البوتيكات اللي يحاسبهم</b> <span class="muted">(ما تكوشي حتى وحدة = يشوف كل البوتيكات)</span></div>
+      <div class="perm-grid">${stores.map((st) => `<label class="check"><input type="checkbox" name="store" value="${st.id}"
+        ${(user.accounting_store_ids || []).includes(st.id) ? 'checked' : ''}> ${esc(st.name)}</label>`).join('')}</div>
+    </div>`;
 }
 
 async function usersPage() {
-  const { users, permissions } = await api('GET', '/users');
+  const [{ users, permissions }, stores] = await Promise.all([api('GET', '/users'), api('GET', '/stores')]);
+  const storeName = (id) => stores.find((st) => st.id === id)?.name || `#${id}`;
   const main = shell(`
     <h2>المستخدمين</h2>
     <form class="card stack" id="user-form">
@@ -1682,13 +1704,14 @@ async function usersPage() {
         <label>اسم المستخدم<input name="username" required></label>
         <label>كلمة السر<input name="password" type="password" required minlength="6"></label>
       </div>
-      ${permissionFields(permissions)}
+      ${permissionFields(permissions, stores)}
       <div class="actions"><button class="btn primary">إضافة</button></div>
     </form>
     <div class="table-wrap"><table>
       <tr><th>الاسم</th><th>النوع</th><th>واش يشوف</th><th>تاريخ الإنشاء</th><th></th></tr>
       ${users.map((u) => `<tr><td>${esc(u.username)}</td><td>${roleLabel(u)}</td>
-        <td class="muted">${u.role === 'admin' ? 'كلش' : u.permissions.map((k) => esc(permissions[k])).join('، ') || '—'}</td>
+        <td class="muted">${u.role === 'admin' ? 'كلش' : u.permissions.map((k) => esc(permissions[k])).join('، ') || '—'}
+          ${u.role !== 'admin' && u.permissions.includes('accounting') ? `<div>الفايدة: ${u.accounting_store_ids.length ? u.accounting_store_ids.map((id) => esc(storeName(id))).join('، ') : 'كل البوتيكات'}</div>` : ''}</td>
         <td class="muted">${esc(fmtDate(u.created_at))}</td>
         <td class="actions"><button class="btn small" data-perms="${u.id}">الصلاحيات</button>
         <button class="btn small" data-pass="${u.id}">كلمة السر</button>
@@ -1705,7 +1728,7 @@ async function usersPage() {
   main.querySelectorAll('[data-perms]').forEach((b) => (b.onclick = () => {
     const u = users.find((x) => x.id === Number(b.dataset.perms));
     const box = modal.open(`<h3>صلاحيات ${esc(u.username)}</h3>
-      <form class="stack" id="perm-form">${permissionFields(permissions, u)}
+      <form class="stack" id="perm-form">${permissionFields(permissions, stores, u)}
         <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إغلاق</button></div></form>`);
     const f = box.querySelector('#perm-form');
     const readEdit = bindPermissionForm(f);

@@ -680,3 +680,30 @@ test('one order, several products in one parcel', async () => {
   assert.equal(await stock(b.id), 9);
   await api('PUT', '/api/delivery/routes', { auto_dispatch: true });
 });
+
+test('an accountant sees the profit of the stores ticked for them only', async () => {
+  const s1 = (await api('POST', '/api/stores', { name: 'COMPTA UN' })).body;
+  const s2 = (await api('POST', '/api/stores', { name: 'COMPTA DEUX' })).body;
+  const p1 = (await api('POST', '/api/products', { name: 'Compta P1', price: 100, store_id: s1.id })).body;
+  const p2 = (await api('POST', '/api/products', { name: 'Compta P2', price: 100, store_id: s2.id })).body;
+  assert.equal((await api('POST', '/api/users', {
+    username: 'compta1', password: 'secret1', role: 'agent', permissions: ['accounting'], accounting_store_ids: [s1.id],
+  })).status, 201);
+  const u = (await api('GET', '/api/users')).body.users.find((x) => x.username === 'compta1');
+  assert.deepEqual(u.accounting_store_ids, [s1.id]);
+
+  await api('POST', '/api/auth/login', { username: 'compta1', password: 'secret1' });
+  const ids = (await api('GET', '/api/accounting')).body.products.map((p) => p.id);
+  assert.ok(ids.includes(p1.id));
+  assert.ok(!ids.includes(p2.id), 'other stores stay hidden');
+  assert.equal((await api('PUT', `/api/accounting/products/${p1.id}`, { creative: 500 })).status, 200);
+  assert.equal((await api('PUT', `/api/accounting/products/${p2.id}`, { creative: 500 })).status, 403);
+  assert.equal((await api('POST', `/api/accounting/products/${p2.id}/purchases`, { quantity: 1, unit_price: 1 })).status, 403);
+  assert.equal((await api('PUT', '/api/accounting/defaults', { confirmation: 1 })).status, 403);
+
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  await api('PUT', `/api/users/${u.id}/permissions`, { role: 'agent', permissions: ['accounting'], accounting_store_ids: [] });
+  await api('POST', '/api/auth/login', { username: 'compta1', password: 'secret1' });
+  assert.ok((await api('GET', '/api/accounting')).body.products.some((p) => p.id === p2.id), 'no store ticked = every store');
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+});

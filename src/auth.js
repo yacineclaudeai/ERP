@@ -71,7 +71,7 @@ export function authMiddleware(db) {
       return next();
     }
     const session = unsign(getCookie(c, COOKIE));
-    const row = session && await db.get('SELECT id, username, role, permissions FROM users WHERE id = ?', session.uid);
+    const row = session && await db.get('SELECT id, username, role, permissions, accounting_store_ids FROM users WHERE id = ?', session.uid);
     if (!row) return c.json({ error: 'غير مسجل' }, 401);
     c.set('user', publicUser(row));
     return next();
@@ -94,9 +94,14 @@ export const PERMISSIONS = {
 
 export const parsePermissions = (v) => String(v || '').split(',').map((s) => s.trim()).filter((s) => s in PERMISSIONS);
 
+export const parseIds = (v) => [...new Set(String(v || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+
 export function publicUser(row) {
-  const permissions = row.role === 'admin' ? Object.keys(PERMISSIONS) : parsePermissions(row.permissions);
-  return { id: row.id, username: row.username, role: row.role, permissions };
+  const admin = row.role === 'admin';
+  const permissions = admin ? Object.keys(PERMISSIONS) : parsePermissions(row.permissions);
+  // Stores whose accounting this account sees; empty = all of them.
+  const accounting_store_ids = admin ? [] : parseIds(row.accounting_store_ids);
+  return { id: row.id, username: row.username, role: row.role, permissions, accounting_store_ids };
 }
 
 export const can = (user, perm) => user?.role === 'admin' || Boolean(user?.permissions?.includes(perm));
