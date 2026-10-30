@@ -916,6 +916,46 @@ test('"update orders" button: pulls the latest LightFunnels orders that webhooks
   }
 });
 
+test('LightFunnels checkouts: unfinished ones become abandoned orders, finished ones replace them', async () => {
+  const crypto = await import('node:crypto');
+  process.env.LF_CLIENT_ID = 'test-client';
+  process.env.LF_CLIENT_SECRET = 'test-secret';
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const link = (await api('POST', '/api/lightfunnels', { name: 'compte checkout' })).body;
+  const send = (topic, node) => {
+    const raw = JSON.stringify({ node });
+    const mac = crypto.createHmac('sha256', 'test-secret').update(raw).digest('base64');
+    return fetch(`${base}/api/public/lightfunnels/${link.id}/${topic}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'lightfunnels-hmac': mac }, body: raw });
+  };
+  const checkout = (extra = {}) => ({
+    id: 'checkout_1', _id: 7001,
+    shipping_address: { first_name: 'Aban', phone: '0551990044', city: 'Oran', state: 'Oran' },
+    items: [{ title: 'LF Checkout Item', price: 1800, quantity: 1 }],
+    ...extra,
+  });
+  // Still being filled in: nothing yet.
+  assert.equal((await send('checkout', checkout({ shipping_address: {} }))).status, 200);
+  assert.equal((await api('GET', '/api/orders?q=0551990044')).body.total, 0);
+  // Complete contact details: one abandoned order, however many updates follow.
+  await send('checkout', checkout());
+  await send('checkout', checkout());
+  let found = (await api('GET', '/api/orders?q=0551990044')).body.rows;
+  assert.equal(found.length, 1);
+  assert.equal(found[0].source, 'abandoned');
+  assert.equal(found[0].status, 'new');
+  // The customer then orders: the abandoned copy is replaced by the real order.
+  await send('created', { id: 'order_after', _id: 7002, name: '#LF7002', total: 2300, shipping: 500, test: false,
+    shipping_address: { first_name: 'Aban', phone: '0551990044', city: 'Oran', state: 'Oran' },
+    items: [{ title: 'LF Checkout Item', price: 1800, quantity: 1 }] });
+  found = (await api('GET', '/api/orders?q=0551990044')).body.rows;
+  assert.deepEqual(found.map((o) => o.source), ['lightfunnels']);
+  // A checkout arriving after the real order is ignored.
+  await send('checkout', checkout({ id: 'checkout_2', _id: 7003 }));
+  assert.equal((await api('GET', '/api/orders?q=0551990044')).body.total, 1);
+  delete process.env.LF_CLIENT_ID;
+  delete process.env.LF_CLIENT_SECRET;
+});
+
 test('only the admin changes the main product of an order; an agent can add another product', async () => {
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
   const a = (await api('POST', '/api/products', { name: 'Main one', price: 1000, stock: 5 })).body;

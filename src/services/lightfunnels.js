@@ -1,14 +1,15 @@
 // Direct connection to LightFunnels: the ERP is an app installed on the LightFunnels account.
 // The user accepts the app once (OAuth), then LightFunnels sends each new order by webhook.
 import crypto from 'node:crypto';
-import { HttpError, createOrder, updateOrder } from './orders.js';
+import { HttpError, createOrder, deleteOrder, updateOrder } from './orders.js';
 import { parseWilaya, productFor, sheetPhone } from './sheets.js';
 
 const AUTHORIZE_URL = 'https://app.lightfunnels.com/admin/oauth';
 const TOKEN_URL = 'https://api.lightfunnels.com/api/v3/access_token';
 const GRAPHQL_URL = 'https://services.lightfunnels.com/api/v2';
 const SCOPES = 'orders,products,stores';
-const TOPICS = { created: 'order/created', confirmed: 'order/confirmed' };
+// webhook path -> LightFunnels topics sent to it ("checkout" = a customer who started but did not finish: abandoned)
+const TOPICS = [['created', 'order/created'], ['confirmed', 'order/confirmed'], ['checkout', 'checkout/created'], ['checkout', 'checkout/updated']];
 
 const secret = () => process.env.SESSION_SECRET || 'dev-secret-change-me';
 export const configured = () => Boolean(process.env.LF_CLIENT_ID && process.env.LF_CLIENT_SECRET);
@@ -129,9 +130,14 @@ export async function connectLink(db, linkId, code, origin) {
   const t = await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(origin) });
   await saveTokens(db, linkId, t);
   const link = await db.get('SELECT * FROM lightfunnels_links WHERE id = ?', linkId);
-  const done = [];
+  return registerWebhooks(db, link, origin, []);
+}
+
+async function registerWebhooks(db, link, origin, have) {
+  const done = [...have];
   const errors = [];
-  for (const [path, type] of Object.entries(TOPICS)) {
+  for (const [path, type] of TOPICS) {
+    if (done.includes(type)) continue;
     try {
       await graphql(db, link, `mutation($node: WebhookInput!) { createWebhook(node: $node) { type url } }`,
         { node: { type, url: `${origin}/api/public/lightfunnels/${link.id}/${path}`, settings: {} } });
@@ -140,8 +146,15 @@ export async function connectLink(db, linkId, code, origin) {
       errors.push(`${type}: ${e.message}`);
     }
   }
-  await db.run('UPDATE lightfunnels_links SET webhooks = ?, last_error = ? WHERE id = ?', done.join(','), errors.join('\n') || null, linkId);
+  await db.run('UPDATE lightfunnels_links SET webhooks = ?, last_error = ? WHERE id = ?', done.join(','), errors.join('\n') || null, link.id);
   return { webhooks: done, errors };
+}
+
+// Links connected before the abandoned-checkout topics existed get them added with the stored token.
+export async function ensureWebhooks(db, link, origin) {
+  const have = String(link.webhooks || '').split(',').filter(Boolean);
+  if (TOPICS.every(([, type]) => have.includes(type))) return { webhooks: have, errors: [] };
+  return registerWebhooks(db, link, origin, have);
 }
 
 // LightFunnels signs the raw body with the app secret (HMAC-SHA256, base64) in the lightfunnels-hmac header.
@@ -178,7 +191,7 @@ export function nodeToOrder(node) {
   const stateRaw = pick(node, 'shipping_address.state', 'shipping_address.province', 'shipping_address.state_code', 'shipping_address.region');
   const wilaya = parseWilaya(stateRaw);
   if (!wilaya) throw new HttpError(400, `ولاية غير معروفة "${stateRaw ?? ''}"`);
-  const items = (Array.isArray(node.items) ? node.items : []).map((i) => ({
+  const items = (Array.isArray(node.items) ? node.items : Array.isArray(node.line_items) ? node.line_items : []).map((i) => ({
     title: text(pick(i, 'title', 'name', 'product.title')),
     sku: text(pick(i, 'sku', 'variant.sku')),
     quantity: Math.max(1, Math.floor(num(pick(i, 'quantity', 'qty')) ?? 1)),
@@ -226,6 +239,7 @@ export async function handleOrderEvent(db, link, topic, node) {
       notes: parsed.notes, items: rest,
     }, { source: 'lightfunnels' });
     await db.run('UPDATE lightfunnels_orders SET order_id = ? WHERE link_id = ? AND lf_order_id = ?', order.id, link.id, lfId);
+    await dropAbandonedCopies(db, parsed.phone, order.id);
     await db.run('UPDATE orders SET external_id = ? WHERE id = ?', node.name ? String(node.name) : lfId, order.id);
     if (parsed.created_at && !Number.isNaN(Date.parse(parsed.created_at))) {
       await db.run('UPDATE orders SET created_at = ? WHERE id = ?', new Date(parsed.created_at).toISOString(), order.id);
@@ -234,6 +248,50 @@ export async function handleOrderEvent(db, link, topic, node) {
   } catch (e) {
     await db.run('DELETE FROM lightfunnels_orders WHERE link_id = ? AND lf_order_id = ?', link.id, lfId);
     throw e;
+  }
+}
+
+// A checkout the customer left without ordering: kept as an "abandoned" order for the confirmation team.
+// A checkout still being filled in (no name/phone/wilaya yet) is skipped, later updates bring the rest.
+export async function handleCheckoutEvent(db, link, node) {
+  const rawId = text(node._id ?? node.id);
+  if (!rawId) throw new HttpError(400, 'رقم الـ checkout ناقص');
+  if (node.test === true) return { ignored: 'test' };
+  const lfId = `co:${rawId}`;
+  let parsed;
+  try {
+    parsed = nodeToOrder(node);
+  } catch (e) {
+    if (!(e instanceof HttpError)) throw e;
+    return { ignored: `ناقص: ${e.message}` };
+  }
+  if (await db.get("SELECT 1 AS x FROM orders WHERE phone = ? AND source = 'lightfunnels' AND created_at > now() - interval '3 days'", parsed.phone)) {
+    return { ignored: 'الزبون دار الطلبية' };
+  }
+  const claim = await db.run('INSERT INTO lightfunnels_orders (link_id, lf_order_id) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING lf_order_id', link.id, lfId);
+  if (!claim.rows.length) return { duplicate: true };
+  try {
+    const [main, ...rest] = await orderLines(db, link, parsed);
+    const order = await createOrder(db, {
+      product_id: main.product_id, quantity: main.quantity, unit_price: main.unit_price,
+      customer_name: parsed.customer_name, phone: parsed.phone, wilaya_code: parsed.wilaya_code, commune: parsed.commune,
+      address: parsed.address, stop_desk: parsed.stop_desk, delivery_fee: parsed.delivery_fee, total: parsed.total,
+      notes: parsed.notes, items: rest,
+    }, { source: 'abandoned' });
+    await db.run('UPDATE lightfunnels_orders SET order_id = ? WHERE link_id = ? AND lf_order_id = ?', order.id, link.id, lfId);
+    return { order_id: order.id };
+  } catch (e) {
+    await db.run('DELETE FROM lightfunnels_orders WHERE link_id = ? AND lf_order_id = ?', link.id, lfId);
+    throw e;
+  }
+}
+
+// The customer finished the order after all: the untouched abandoned copy of the same phone goes away.
+async function dropAbandonedCopies(db, phone, exceptId) {
+  const rows = await db.all(`SELECT id FROM orders WHERE phone = ? AND source = 'abandoned' AND status = 'new'
+    AND call_attempts = 0 AND assigned_to IS NULL AND id <> ? AND created_at > now() - interval '3 days'`, phone, exceptId);
+  for (const r of rows) {
+    try { await deleteOrder(db, r.id); } catch (e) { if (!(e instanceof HttpError)) throw e; }
   }
 }
 

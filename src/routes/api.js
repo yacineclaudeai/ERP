@@ -298,6 +298,8 @@ export function apiRouter(db) {
     const lightfunnels = { imported: 0, errors: [] };
     for (const link of lfLinks) {
       try {
+        const hooks = await lf.ensureWebhooks(db, link, new URL(c.req.url).origin);
+        lightfunnels.errors.push(...hooks.errors);
         const r = await lf.pullRecent(db, link);
         lightfunnels.imported += r.imported;
         lightfunnels.errors.push(...r.errors);
