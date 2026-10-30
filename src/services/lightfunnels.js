@@ -295,6 +295,7 @@ async function dropAbandonedCopies(db, phone, exceptId) {
   const rows = await db.all(`SELECT id FROM orders WHERE phone = ? AND source = 'abandoned' AND status = 'new'
     AND call_attempts = 0 AND assigned_to IS NULL AND id <> ? AND created_at > now() - interval '3 days'`, phone, exceptId);
   for (const r of rows) {
+    console.log('lightfunnels checkout replaced by real order:', r.id, '->', exceptId);
     try { await deleteOrder(db, r.id); } catch (e) { if (!(e instanceof HttpError)) throw e; }
   }
 }
