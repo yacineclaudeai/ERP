@@ -876,38 +876,30 @@ test('"update orders" button: pulls the latest LightFunnels orders that webhooks
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
   const { id } = (await api('POST', '/api/lightfunnels', { name: 'compte pull' })).body;
   await db.run("UPDATE lightfunnels_links SET access_token = 'tok', expires_at = now() + interval '1 hour' WHERE id = ?", id);
-  const kinds = {
-    Order: { id: 'ID', _id: 'Int', name: 'String', total: 'Float', shipping: 'Float', test: 'Boolean', date: 'String', customer: 'Customer', shipping_address: 'Address', items: 'OrderItem' },
-    Customer: { full_name: 'String' },
-    Address: { first_name: 'String', phone: 'String', address1: 'String', city: 'String', state: 'String' },
-    OrderItem: { title: 'String', price: 'Float', qty: 'Int' },
-  };
   const real = globalThis.fetch;
   let ordersQuery = '';
   globalThis.fetch = async (url, init) => {
     if (!String(url).startsWith('https://services.lightfunnels.com')) return real(url, init);
-    const { query, variables } = JSON.parse(init.body);
-    if (query.includes('__type')) {
-      const fields = Object.entries(kinds[variables.n]).map(([name, t]) => ({ name,
-        type: { name: kinds[t] ? t : t, kind: kinds[t] ? 'OBJECT' : 'SCALAR', ofType: null } }));
-      return Response.json({ data: { __type: { fields } } });
-    }
+    const { query } = JSON.parse(init.body);
+    if (query.includes('createWebhook')) return Response.json({ data: { createWebhook: { type: 'x', url: 'y' } } });
     ordersQuery = query;
     return Response.json({ data: { orders: { edges: [{ node: {
       id: 'order_pull', _id: 5001, name: '#LF5001', total: 3100, shipping: 600, test: false, date: '2026-10-30T10:00:00Z',
       customer: { full_name: 'Pull Client' },
-      shipping_address: { first_name: 'Pull', phone: '0551990033', address1: 'Rue 2', city: 'Oran', state: 'Oran' },
-      items: [{ title: 'LF Pull Item', price: 2500, qty: 1 }],
+      shipping_address: { first_name: 'Pull', phone: '0551990033', line1: 'Rue 2', city: 'Oran', state: 'Oran' },
+      items: [{ title: 'LF Pull Item', sku: 'P1', price: 1250 }, { title: 'LF Pull Item', sku: 'P1', price: 1250 }],
     } }] } } });
   };
   try {
     const r = (await api('POST', '/api/orders/pull')).body;
     assert.equal(r.lightfunnels, 1);
     assert.deepEqual(r.lightfunnels_errors, []);
-    assert.match(ordersQuery, /shipping_address \{ first_name phone address1 city state \}/);
+    assert.match(ordersQuery, /shipping_address \{ first_name last_name phone line1 line2 city area state \}/);
+    assert.doesNotMatch(ordersQuery, /__type|__schema/);
     const found = (await api('GET', '/api/orders?q=0551990033')).body.rows;
     assert.equal(found.length, 1);
     assert.equal(found[0].wilaya_code, 31);
+    assert.deepEqual([found[0].quantity, found[0].address], [2, 'Rue 2'], 'one item per unit is merged');
     assert.equal((await api('POST', '/api/orders/pull')).body.lightfunnels, 0, 'the same order is not imported twice');
   } finally {
     globalThis.fetch = real;
@@ -955,30 +947,19 @@ test('LightFunnels checkouts: unfinished ones become abandoned orders, finished 
 
   // The real webhook only carries the checkout id: the details are read back from the API.
   await db.run("UPDATE lightfunnels_links SET access_token = 'tok', expires_at = now() + interval '1 hour' WHERE id = ?", link.id);
-  const kinds = {
-    Checkout: { id: 'ID', full_name: 'String', phone: 'String', shipping_address: 'Address', items: 'Line' },
-    Address: { state: 'String', city: 'String' },
-    Line: { title: 'String', price: 'Float', quantity: 'Int' },
-  };
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     if (!String(url).startsWith('https://services.lightfunnels.com')) return real(url, init);
     const { query, variables } = JSON.parse(init.body);
-    if (query.includes('__schema')) {
-      return Response.json({ data: { __schema: { queryType: { fields: [{ name: 'checkout', args: [{ name: 'id', type: { name: null, kind: 'NON_NULL', ofType: { name: 'ID', kind: 'SCALAR' } } }], type: { name: 'Checkout', kind: 'OBJECT' } }] } } } });
-    }
-    if (query.includes('__type')) {
-      const fields = Object.entries(kinds[variables.n]).map(([name, t]) => ({ name, type: { name: t, kind: kinds[t] ? 'OBJECT' : 'SCALAR', ofType: null } }));
-      return Response.json({ data: { __type: { fields } } });
-    }
-    assert.match(query, /checkout\(id: \$id\)/);
-    return Response.json({ data: { r: { id: variables.id, full_name: 'Only Id', phone: '0551990055',
-      shipping_address: { state: 'Oran', city: 'Oran' }, items: [{ title: 'LF Checkout Item', price: 1800, quantity: 1 }] } } });
+    assert.match(query, /node\(id: \$id\) \{ \.\.\. on Checkout/);
+    return Response.json({ data: { node: { id: variables.id, recovered: false, phone: '0551990055', customer: { full_name: 'Only Id' },
+      shipping_address: { state: 'Oran', city: 'Oran' },
+      variants: [{ quantity: 2, variant: { title: 'Rouge', sku: 'C1', price: 1800, product: { title: 'LF Checkout Item' } } }] } } });
   };
   try {
     await send('checkout', { id: 'ch_only_id' });
     found = (await api('GET', '/api/orders?q=0551990055')).body.rows;
-    assert.deepEqual(found.map((o) => [o.source, o.customer_name]), [['abandoned', 'Only Id']]);
+    assert.deepEqual(found.map((o) => [o.source, o.customer_name, o.quantity, o.product_name]), [['abandoned', 'Only Id', 2, 'LF Checkout Item']]);
   } finally {
     globalThis.fetch = real;
   }

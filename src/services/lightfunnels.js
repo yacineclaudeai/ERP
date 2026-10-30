@@ -79,61 +79,29 @@ async function graphql(db, link, query, variables) {
   return data.data;
 }
 
-// Field names of a GraphQL type: { name: { type, kind } } (the API is only partly documented, so we ask it).
-async function fieldsOf(db, link, typeName) {
-  const d = await graphql(db, link, `query($n: String!) { __type(name: $n) { fields { name type { name kind ofType { name kind ofType { name kind ofType { name kind } } } } } } }`, { n: typeName });
-  const out = {};
-  for (const f of d.__type?.fields || []) {
-    let t = f.type;
-    while (t && !t.name) t = t.ofType;
-    out[f.name] = { type: t?.name || null, kind: t?.kind || null };
-  }
-  return out;
-}
-
-// Selection of an object type: its scalar fields, plus the scalar fields of its customer, addresses
-// and items. Works whatever the exact names are, the order reader tries several spellings.
-const NESTED = /^(customer|contact|shipping_address|billing_address|address|items|line_items|lines|products)$/;
-async function typeSelection(db, link, typeName) {
-  const have = await fieldsOf(db, link, typeName);
-  const flat = (f) => Object.entries(f).filter(([, x]) => x.kind === 'SCALAR' || x.kind === 'ENUM').map(([n]) => n);
-  const parts = flat(have);
-  for (const [name, f] of Object.entries(have)) {
-    if (f.kind !== 'OBJECT' || !NESTED.test(name)) continue;
-    const inner = flat(await fieldsOf(db, link, f.type));
-    if (inner.length) parts.push(`${name} { ${inner.join(' ')} }`);
-  }
-  return parts.join(' ');
-}
-const orderSelection = (db, link) => typeSelection(db, link, 'Order');
+// LightFunnels refuses introspection, so the fields are written out (developer.lightfunnels.com/orders/types).
+const ADDRESS = 'shipping_address { first_name last_name phone line1 line2 city area state }';
+const ORDER_FIELDS = `id _id name total shipping test created_at notes phone customer { full_name phone } ${ADDRESS}
+  items { ... on VariantSnapshot { title sku price variant { title } } ... on OrderBumpSnapshot { title sku price } }`;
+const CHECKOUT_FIELDS = `id _id phone total created_at recovered customer { full_name first_name last_name phone } ${ADDRESS}
+  variants { quantity variant { title sku price product { title } } }`;
 
 // The checkout webhook only carries the checkout id: the details are read back from the API.
-// The query to use is found by asking the API which root field returns a Checkout.
-const typeRef = `type { name kind ofType { name kind ofType { name kind } } }`;
-const unwrap = (t) => { while (t && !t.name) t = t.ofType; return t; };
-const sdl = (t) => (t.kind === 'NON_NULL' ? `${sdl(t.ofType)}!` : t.kind === 'LIST' ? `[${sdl(t.ofType)}]` : t.name);
 export async function fetchCheckout(db, link, id) {
-  const schema = await graphql(db, link, `{ __schema { queryType { fields { name args { name ${typeRef} } ${typeRef} } } } }`);
-  const fields = schema.__schema?.queryType?.fields || [];
-  const sel = await typeSelection(db, link, 'Checkout');
-  const direct = fields.find((f) => unwrap(f.type)?.name === 'Checkout' && f.args.some((a) => /^(id|_id)$/.test(a.name)));
-  if (direct) {
-    const arg = direct.args.find((a) => /^(id|_id)$/.test(a.name));
-    const d = await graphql(db, link, `query($id: ${sdl(arg.type)}) { r: ${direct.name}(${arg.name}: $id) { ${sel} } }`, { id: /Int/.test(sdl(arg.type)) ? Number(id) : id });
-    return d.r;
-  }
-  const node = fields.find((f) => f.name === 'node');
-  if (node) {
-    const d = await graphql(db, link, `query($id: ID!) { r: node(id: $id) { ... on Checkout { ${sel} } } }`, { id });
-    return d.r;
-  }
-  throw new HttpError(502, `ما لقيتش كيفاش نقرا الـ checkout (${fields.map((f) => f.name).filter((n) => /checkout/i.test(n)).join(', ') || 'لا شيء'})`);
+  const d = await graphql(db, link, `query($id: ID!) { node(id: $id) { ... on Checkout { ${CHECKOUT_FIELDS} } } }`, { id });
+  const c = d.node;
+  if (!c) return null;
+  // A checkout lists variants; the reader wants items like an order's.
+  c.items = (c.variants || []).map((v) => ({
+    title: v.variant?.product?.title || v.variant?.title, sku: v.variant?.sku, price: v.variant?.price, quantity: v.quantity,
+    variant_title: v.variant?.product?.title && v.variant?.title !== v.variant?.product?.title ? v.variant?.title : null,
+  }));
+  return c;
 }
 
 // Catch-up: reads the latest orders of the account and imports the ones the webhooks did not bring.
 export async function pullRecent(db, link, { first = 25 } = {}) {
-  const selection = await orderSelection(db, link);
-  const data = await graphql(db, link, `query($first: Int) { orders(query: "order_by:id order_dir:desc", first: $first) { edges { node { ${selection} } } } }`, { first });
+  const data = await graphql(db, link, `query($first: Int) { orders(query: "order_by:id order_dir:desc", first: $first) { edges { node { ${ORDER_FIELDS} } } } }`, { first });
   const nodes = (data.orders?.edges || []).map((e) => e.node).reverse();
   const result = { seen: nodes.length, imported: 0, errors: [] };
   for (const node of nodes) {
@@ -223,15 +191,19 @@ export function nodeToOrder(node) {
     quantity: Math.max(1, Math.floor(num(pick(i, 'quantity', 'qty')) ?? 1)),
     price: num(pick(i, 'price', 'unit_price')),
     variant: text(pick(i, 'variant_title', 'variant.title', 'variant_name')),
-  })).filter((i) => i.title || i.sku);
+  })).filter((i) => i.title || i.sku).reduce((acc, i) => {
+    const same = acc.find((x) => x.title === i.title && x.sku === i.sku && x.price === i.price && x.variant === i.variant);
+    if (same) same.quantity += i.quantity; else acc.push(i);
+    return acc;
+  }, []);
   if (!items.length) throw new HttpError(400, 'ما كاش منتجات في الطلبية');
   const method = text(pick(node, 'shipping_method.title', 'shipping_line.title', 'shipping_method', 'shipping_title')) || '';
   return {
     customer_name: name,
     phone,
     wilaya_code: wilaya,
-    commune: text(pick(node, 'shipping_address.city', 'shipping_address.commune')),
-    address: text([ship.address1 ?? ship.address, ship.address2].filter(Boolean).join(' ')),
+    commune: text(pick(node, 'shipping_address.city', 'shipping_address.commune', 'shipping_address.area')),
+    address: text([ship.address1 ?? ship.line1 ?? ship.address, ship.address2 ?? ship.line2].filter(Boolean).join(' ')),
     stop_desk: /desk|bureau|stop|agence|office|مكتب/i.test(method),
     delivery_fee: num(pick(node, 'shipping', 'shipping_price', 'shipping_total')),
     total: num(node.total),
@@ -285,6 +257,7 @@ export async function handleCheckoutEvent(db, link, node) {
   if (!node.items && !node.line_items && !node.shipping_address) {
     const full = await fetchCheckout(db, link, text(node.id) ?? rawId);
     if (!full) return { ignored: 'checkout ما لقيناهش' };
+    if (full.recovered) return { ignored: 'الزبون كمل الطلبية', node: full };
     node = { ...node, ...full };
   }
   if (node.test === true) return { ignored: 'test', node };
