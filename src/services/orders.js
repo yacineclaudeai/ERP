@@ -238,6 +238,18 @@ export async function applyAction(db, id, action, { userId = null, note = null, 
         await logEvent(t, id, 'edited', `الفاشلة ${order.call_attempts} ← الفاشلة ${n}`, userId);
         break;
       }
+      // -1: the previous failed number; from الفاشلة 1 back to new.
+      case 'unfail':
+        if (order.status !== 'no_answer') throw new HttpError(409, 'الحالة لا تسمح');
+        if (order.call_attempts > 1) {
+          const n = Math.min(5, order.call_attempts - 1);
+          await t.run('UPDATE orders SET call_attempts = ?, updated_at = now() WHERE id = ?', n, id);
+          await logEvent(t, id, 'edited', `الفاشلة ${order.call_attempts} ← الفاشلة ${n}`, userId);
+        } else {
+          await set('new', ', call_attempts = 0');
+          await logEvent(t, id, 'reopened', note || 'رجعت جديدة', userId);
+        }
+        break;
       case 'no_answer': {
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await t.run(`UPDATE orders SET status = 'no_answer', call_attempts = call_attempts + 1,

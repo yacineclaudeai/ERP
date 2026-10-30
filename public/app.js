@@ -673,7 +673,8 @@ function orderRow(o, products, companies, stores) {
     <td class="nowrap"><a class="wa" href="${whatsapp(o.phone)}" target="_blank" rel="noopener" title="WhatsApp">●</a>
       ${text('phone', o.phone, 'style="width:100px" dir="ltr"')}</td>
     <td class="nowrap"><span class="calls ${o.call_attempts ? 'has' : ''}" title="محاولات الاتصال">${o.call_attempts || 0} ✆</span>
-      ${['new', 'no_answer', 'postponed'].includes(o.status) ? '<button class="plus" data-attempt title="ما ردش: الفاشلة اللي بعدها">+1</button>' : ''}</td>
+      ${['new', 'no_answer', 'postponed'].includes(o.status) ? '<button class="plus" data-attempt title="ما ردش: الفاشلة اللي بعدها">+1</button>' : ''}
+      ${o.status === 'no_answer' ? '<button class="plus" data-unattempt title="غلطت: الفاشلة اللي قبلها">-1</button>' : ''}</td>
     <td class="nowrap">${statusCell(o)}${o.dispatch_error ? `<div class="err" title="${esc(o.dispatch_error)}">خطأ إرسال</div>` : ''}</td>
     <td>${text('address', o.address, 'style="width:120px"')}</td>
     <td>${can('products') && edit
@@ -773,6 +774,7 @@ function bindOrderTable(table, rows, products, companies, stores) {
     if (!tr) return;
     const id = Number(tr.dataset.id);
     if (e.target.closest('[data-attempt]')) return save(tr, () => api('POST', `/orders/${id}/action`, { action: 'no_answer' }));
+    if (e.target.closest('[data-unattempt]')) return save(tr, () => api('POST', `/orders/${id}/action`, { action: 'unfail' }));
     if (e.target.closest('[data-edit]')) return orderForm(byId.get(id), products);
     if (e.target.closest('[data-dispatch]')) return save(tr, () => api('POST', `/orders/${id}/dispatch`, {}));
     if (e.target.closest('[data-received]')) return save(tr, () => api('POST', `/orders/${id}/action`, { action: 'return_received' }));
@@ -824,6 +826,7 @@ async function openOrder(id) {
       ${open ? `
         <button class="btn primary" data-action="confirm">✔ تأكيد وإرسال</button>
         <button class="btn" data-action="no_answer">ما ردش (الفاشلة ${(o.call_attempts || 0) + 1})</button>
+        ${o.status === 'no_answer' ? '<button class="btn" data-action="unfail" title="غلطت">-1 (الفاشلة اللي قبلها)</button>' : ''}
         <button class="btn" data-action="postpone">تأجيل</button>
         <button class="btn danger" data-action="cancel">إلغاء</button>` : ''}
       ${o.status === 'confirmed' ? `
