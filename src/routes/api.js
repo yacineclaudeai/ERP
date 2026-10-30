@@ -337,7 +337,13 @@ export function apiRouter(db) {
 
   r.put('/orders/:id', ordersAccess, async (c) => {
     await checkOrderAccess(c.get('user'), idParam(c));
-    return c.json(await updateOrder(db, idParam(c), body(c), c.get('user').id));
+    // Only the admin changes the main product of an order (the others can add products).
+    const b = body(c);
+    if (c.get('user').role !== 'admin' && b.product_id != null && b.product_id !== '') {
+      const current = await db.get('SELECT product_id FROM orders WHERE id = ?', idParam(c));
+      if (Number(b.product_id) !== current?.product_id) throw new HttpError(403, 'المدير برك يبدل المنتج الرئيسي');
+    }
+    return c.json(await updateOrder(db, idParam(c), b, c.get('user').id));
   });
 
   r.post('/orders/:id/action', ordersAccess, async (c) => {
