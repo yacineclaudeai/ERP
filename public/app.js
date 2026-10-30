@@ -1567,7 +1567,7 @@ async function sheetsPage() {
     <div class="card">
       <h3>الربط المباشر مع LightFunnels</h3>
       <p class="muted">LightFunnels يبعث كل طلبية للـ ERP في نفس اللحظة، من غير شيت. تربط كل حساب مرة وحدة وتختار له البوتيك.</p>
-      ${direct.configured ? '' : '<p class="neg">مازال ما تحطوش LF_CLIENT_ID و LF_CLIENT_SECRET في إعدادات Netlify، من غيرهم الربط ما يخدمش.</p>'}
+      ${direct.configured ? '' : `<p class="neg">الموقع ما شافش ${direct.missing.map((k) => `<b dir="ltr">${k}</b>`).join(' و ')} في إعدادات Netlify. تأكد من الاسم بالضبط، ومن بعد Deploys ← Trigger deploy ← Deploy site.</p>`}
       ${lfResult === 'ok' ? '<p class="pos">تم الربط، ولات الطلبيات الجديدة تدخل وحدها.</p>' : lfResult === 'partial' ? '<p class="neg">تم الربط بصح تسجيل الطلبيات فشل، شوف الخطأ تحت.</p>' : ''}
       <div class="bar"><button class="btn primary" id="lf-add">+ ربط حساب LightFunnels</button></div>
       <div class="table-wrap"><table>

@@ -12,6 +12,8 @@ const TOPICS = { created: 'order/created', confirmed: 'order/confirmed' };
 
 const secret = () => process.env.SESSION_SECRET || 'dev-secret-change-me';
 export const configured = () => Boolean(process.env.LF_CLIENT_ID && process.env.LF_CLIENT_SECRET);
+// Which of the two Netlify variables the server can see, so the page can say exactly what is missing.
+export const missingKeys = () => ['LF_CLIENT_ID', 'LF_CLIENT_SECRET'].filter((k) => !process.env[k]);
 export const redirectUri = (origin) => `${origin}/api/lightfunnels/callback`;
 
 // The state travels to LightFunnels and back: it says which link is being connected, and it is signed.
