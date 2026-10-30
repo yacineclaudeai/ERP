@@ -166,7 +166,7 @@ export function rowToOrder(get, kind) {
   const unit_price = subtotal != null ? subtotal / quantity
     : total != null ? Math.max(0, total - (shipping || 0)) / quantity : null;
   const discount = number(get('discount'));
-  const notes = [get('variant'), get('notes'), discount ? `تخفيض: ${discount}` : null]
+  const notes = [get('notes'), discount ? `تخفيض: ${discount}` : null]
     .filter((x) => String(x ?? '').trim()).join(' | ');
   return {
     customer_name: String(get('customer_name')).trim(),
@@ -181,6 +181,7 @@ export function rowToOrder(get, kind) {
     delivery_fee: shipping,
     total,
     notes: notes || null,
+    variant: String(get('variant') ?? '').trim() || null,
     status: kind === 'fake' ? 'fake' : 'new',
     created_at: parseSheetDate(get('created_at')),
   };

@@ -959,7 +959,7 @@ test('LightFunnels checkouts: unfinished ones become abandoned orders, finished 
   try {
     await send('checkout', { id: 'ch_only_id' });
     found = (await api('GET', '/api/orders?q=0551990055')).body.rows;
-    assert.deepEqual(found.map((o) => [o.source, o.customer_name, o.quantity, o.product_name]), [['abandoned', 'Only Id', 2, 'LF Checkout Item']]);
+    assert.deepEqual(found.map((o) => [o.source, o.customer_name, o.quantity, o.product_name, o.variant]), [['abandoned', 'Only Id', 2, 'LF Checkout Item', 'Rouge']]);
   } finally {
     globalThis.fetch = real;
   }

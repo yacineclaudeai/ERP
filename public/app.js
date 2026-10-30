@@ -505,7 +505,7 @@ async function ordersPage(mode = 'confirm') {
         ${hfilter('الولاية', 'wilaya', state.meta.wilayas.map((w) => [w.code, `${w.code} - ${w.name_fr}`]))}
         <th>البلدية</th>
         ${hfilter('المنتج', 'product_id', products.map((p) => [p.id, p.name]))}
-        <th>سعر المنتج</th><th>الكمية</th><th>سعر التوصيل</th><th>السعر الكلي</th><th>التفاصيل</th>
+        <th>المتغير</th><th>سعر المنتج</th><th>الكمية</th><th>سعر التوصيل</th><th>السعر الكلي</th><th>التفاصيل</th>
         ${hfilter('شركة التوصيل', 'company_id', companies.map((c) => [c.id, c.name]))}
         ${assigning ? hfilter('المؤكدة', 'assigned_to', [['none', 'بلا مؤكدة'], ...team.agents.map((u) => [u.id, u.username])]) : ''}
         <th>التأكيد بواسطة</th><th>الإجراءات</th>
@@ -697,7 +697,8 @@ function orderRow(o, products, companies, stores) {
     <td>${edit ? pick('stop_desk', [['0', 'المنزل'], ['1', 'مكتب']], o.stop_desk ? '1' : '0') : o.stop_desk ? 'مكتب' : 'المنزل'}</td>
     <td>${edit ? pick('wilaya_code', state.meta.wilayas.map((w) => [w.code, `${w.code} - ${w.name_fr}`]), o.wilaya_code, '', 'w') : esc(wilaya(o.wilaya_code))}</td>
     <td>${text('commune', o.commune, 'style="width:110px"')}</td>
-    <td class="prod-cell">${esc(o.product_name)}${o.items?.length ? `<div class="extra-items" title="${esc(o.items.map((i) => `${i.product_name} × ${i.quantity}`).join('، '))}">+ ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : ''}</td>
+    <td class="prod-cell" title="${esc(o.product_name)}"><div class="clamp">${esc(o.product_name)}</div>${o.items?.length ? `<div class="extra-items" title="${esc(o.items.map((i) => `${i.product_name} × ${i.quantity}`).join('، '))}">+ ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : ''}</td>
+    <td class="variant-cell">${text('variant', o.variant, 'style="width:120px" placeholder="—"')}</td>
     <td class="num">${num('unit_price', o.unit_price)}</td>
     <td class="num">${edit ? `<input class="cell num" data-field="quantity" value="${o.quantity}" type="number" min="1" style="width:44px">` : o.quantity}</td>
     <td class="num">${num('delivery_fee', o.delivery_fee, 56)}</td>
@@ -829,6 +830,7 @@ async function openOrder(id) {
       <div><div class="muted">شركة التوصيل</div>${esc(o.company_name || 'غير محددة')} ${esc(o.tracking || '')}</div>
       <div><div class="muted">المصدر</div>${SOURCE_LABELS[o.source] || o.source} ${o.utm_campaign ? `· ${esc(o.utm_campaign)}` : ''}</div>
     </div>
+    ${o.variant ? `<p><span class="muted">المتغير:</span> ${esc(o.variant)}</p>` : ''}
     ${o.notes ? `<p><span class="muted">ملاحظة:</span> ${esc(o.notes)}</p>` : ''}
     <hr>
     <label>ملاحظة على الإجراء<input id="note" placeholder="اختياري"></label>
@@ -923,6 +925,7 @@ async function orderForm(order, products) {
       <div><button class="btn small" type="button" id="add-item">+ منتج آخر</button></div>`}
       <div class="muted" id="order-total"></div>
       <label class="check"><input type="checkbox" name="stop_desk" ${o.stop_desk ? 'checked' : ''}> استلام من المكتب (Stop desk)</label>
+      <label>المتغير (المقاس، اللون)<input name="variant" value="${esc(o.variant || '')}"></label>
       <label>ملاحظة<textarea name="notes">${esc(o.notes)}</textarea></label>
       <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إلغاء</button></div>
     </form>`);
