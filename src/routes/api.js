@@ -19,6 +19,7 @@ import {
 } from '../services/ads.js';
 import { scanStore, applyStoreLinks, normalizeName, newProductStore } from '../services/branches.js';
 import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet } from '../services/sheets.js';
+import * as lf from '../services/lightfunnels.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
 const idParam = (c) => Math.max(0, Math.floor(Number(c.req.param('id')))) || 0;
@@ -540,6 +541,43 @@ export function apiRouter(db) {
     const source = await db.get('SELECT * FROM sheet_sources WHERE id = ?', idParam(c));
     if (!source) throw new HttpError(404, 'الشيت غير موجود');
     return c.json(await syncSheet(db, source));
+  });
+
+  // ---- direct LightFunnels connection (OAuth app + order webhooks) ----
+  r.get('/lightfunnels', requirePerm('sheets'), async (c) => c.json({
+    configured: lf.configured(),
+    redirect_uri: lf.redirectUri(new URL(c.req.url).origin),
+    links: await db.all(`SELECT l.id, l.name, l.store_id, s.name AS store_name, l.webhooks, l.imported_count, l.last_event_at,
+        l.last_error, l.active, (l.access_token IS NOT NULL) AS connected
+      FROM lightfunnels_links l LEFT JOIN stores s ON s.id = l.store_id ORDER BY l.id`),
+    events: await db.all(`SELECT e.id, e.link_id, e.topic, e.lf_order_id, e.status, e.error, e.order_id, e.created_at
+      FROM lightfunnels_events e ORDER BY e.id DESC LIMIT 15`),
+  }));
+  r.post('/lightfunnels', requirePerm('sheets'), async (c) => {
+    const b = body(c);
+    const name = String(b.name || '').trim();
+    if (!name) throw new HttpError(400, 'الاسم ضروري');
+    const { rows } = await db.run('INSERT INTO lightfunnels_links (name, store_id) VALUES (?, ?) RETURNING id', name, b.store_id ? Number(b.store_id) : null);
+    return c.json({ id: rows[0].id }, 201);
+  });
+  // The user comes back from LightFunnels here after accepting the app. Registered before /:id routes.
+  r.get('/lightfunnels/callback', requirePerm('sheets'), async (c) => {
+    const linkId = lf.readState(c.req.query('state'));
+    const code = c.req.query('code');
+    if (!linkId || !code) throw new HttpError(400, 'رابط الربط غير صالح أو انتهت صلاحيتو، عاود من صفحة الشيتات');
+    const origin = new URL(c.req.url).origin;
+    const r2 = await lf.connectLink(db, linkId, code, origin);
+    return c.redirect(`/#/sheets?lf=${r2.errors.length ? 'partial' : 'ok'}`);
+  });
+  r.get('/lightfunnels/:id/connect', requirePerm('sheets'), async (c) => {
+    if (!lf.configured()) throw new HttpError(409, 'LF_CLIENT_ID و LF_CLIENT_SECRET ما تحطوش في Netlify');
+    const link = await db.get('SELECT id FROM lightfunnels_links WHERE id = ?', idParam(c));
+    if (!link) throw new HttpError(404, 'الربط غير موجود');
+    return c.redirect(lf.authorizeUrl(new URL(c.req.url).origin, link.id));
+  });
+  r.delete('/lightfunnels/:id', requirePerm('sheets'), async (c) => {
+    await db.run('DELETE FROM lightfunnels_links WHERE id = ?', idParam(c));
+    return c.json({ ok: true });
   });
 
   // ---- ad spend (Meta Ads etc.) ----

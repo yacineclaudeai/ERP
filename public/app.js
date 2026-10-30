@@ -13,7 +13,7 @@ const EVENT_LABELS = {
   delivered: 'تستلمت', returned: 'روتور', return_received: 'الروتور وصل', edited: 'تعدلت',
   assigned: 'تعطات لمؤكدة', transferred: 'تحولت لمؤكدة أخرى',
 };
-const SOURCE_LABELS = { landing: 'صفحة الهبوط', sheet: 'شيت', abandoned: 'متروكة', manual: 'يدوي' };
+const SOURCE_LABELS = { landing: 'صفحة الهبوط', sheet: 'شيت', lightfunnels: 'LightFunnels', abandoned: 'متروكة', manual: 'يدوي' };
 const SOURCE_ICONS = { landing: '🌐', sheet: '📗', abandoned: '🛒', manual: '✍️' };
 // wa.me wants the number in international form, without the leading 0.
 const whatsapp = (phone) => `https://wa.me/213${String(phone).replace(/^0/, '')}`;
@@ -633,7 +633,7 @@ const ICONS = {
   hand: '<path d="M4 20h16M6 16l9-9 3 3-9 9H6z"/>',
 };
 const icon = (name, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
-const SOURCE_ICON = { sheet: 'sheet', abandoned: 'cart', landing: 'web', manual: 'hand' };
+const SOURCE_ICON = { sheet: 'sheet', lightfunnels: 'web', abandoned: 'cart', landing: 'web', manual: 'hand' };
 
 function statusCell(o) {
   const moves = STATUS_MOVES[o.status];
@@ -1559,9 +1559,32 @@ const SHEET_FIELD_LABELS = {
 };
 
 async function sheetsPage() {
-  const [sheets, stores] = await Promise.all([api('GET', '/sheets'), api('GET', '/stores')]);
+  const [sheets, stores, direct] = await Promise.all([api('GET', '/sheets'), api('GET', '/stores'), api('GET', '/lightfunnels')]);
+  const lfResult = new URLSearchParams(location.hash.split('?')[1] || '').get('lf');
+  const eventLabel = { imported: 'دخلت', duplicate: 'مكررة', ignored: 'تجريبية', error: 'خطأ' };
   const main = shell(`
     <h2>الشيتات</h2>
+    <div class="card">
+      <h3>الربط المباشر مع LightFunnels</h3>
+      <p class="muted">LightFunnels يبعث كل طلبية للـ ERP في نفس اللحظة، من غير شيت. تربط كل حساب مرة وحدة وتختار له البوتيك.</p>
+      ${direct.configured ? '' : '<p class="neg">مازال ما تحطوش LF_CLIENT_ID و LF_CLIENT_SECRET في إعدادات Netlify، من غيرهم الربط ما يخدمش.</p>'}
+      ${lfResult === 'ok' ? '<p class="pos">تم الربط، ولات الطلبيات الجديدة تدخل وحدها.</p>' : lfResult === 'partial' ? '<p class="neg">تم الربط بصح تسجيل الطلبيات فشل، شوف الخطأ تحت.</p>' : ''}
+      <div class="bar"><button class="btn primary" id="lf-add">+ ربط حساب LightFunnels</button></div>
+      <div class="table-wrap"><table>
+        <tr><th>الحساب</th><th>البوتيك</th><th>الحالة</th><th>دخلو</th><th>آخر طلبية</th><th>أخطاء</th><th></th></tr>
+        ${direct.links.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.store_name || '—')}</td>
+          <td>${l.connected ? (l.webhooks ? '<span class="badge ok">مربوط</span>' : '<span class="badge warn">مربوط، بلا Webhooks</span>') : '<span class="badge warn">ما تربطش</span>'}</td>
+          <td class="num">${l.imported_count}</td><td class="muted">${fmtDate(l.last_event_at) || '—'}</td>
+          <td class="muted" style="white-space:pre-line;color:var(--danger)">${esc(l.last_error || '')}</td>
+          <td class="actions"><a class="btn small primary" href="/api/lightfunnels/${l.id}/connect">${l.connected ? 'عاود الربط' : 'ربط'}</a>
+            <button class="btn small danger" data-lf-del="${l.id}">حذف</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">ما كاين حتى ربط</td></tr>'}
+      </table></div>
+      ${direct.events.length ? `<details><summary class="muted">آخر الطلبيات اللي وصلت من LightFunnels</summary>
+        <div class="table-wrap"><table><tr><th>الوقت</th><th>النوع</th><th>رقم LightFunnels</th><th>النتيجة</th></tr>
+        ${direct.events.map((e) => `<tr><td class="muted">${fmtDate(e.created_at)}</td><td>${esc(e.topic)}</td><td dir="ltr">${esc(e.lf_order_id || '')}</td>
+          <td>${eventLabel[e.status] || e.status}${e.error ? ` <span class="neg">${esc(e.error)}</span>` : ''}</td></tr>`).join('')}</table></div></details>` : ''}
+    </div>
+    <h3>الشيتات (احتياط)</h3>
     <p class="muted">الطلبيات تدخل وحدها من Google Sheets (كيما LightFunnels) كل 5 دقايق. الشيت لازم يكون مشارك: Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur. الطلبيات المتروكة (Abandoned) تدخل للتأكيد بعلامة "متروكة"، والطلبيات من شيت وهمي تدخل بحالة "وهمية" وما تتبعثش للتوصيل.</p>
     <div class="bar"><button class="btn primary" id="add">+ شيت</button></div>
     <div class="table-wrap"><table>
@@ -1575,6 +1598,12 @@ async function sheetsPage() {
         <td class="actions"><button class="btn small" data-sync="${g.id}">جيب دوكا</button>
           <button class="btn small" data-edit="${g.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">زيد الشيت الأول</td></tr>'}
     </table></div>`);
+  main.querySelector('#lf-add').onclick = () => lfForm(stores);
+  main.querySelectorAll('[data-lf-del]').forEach((b) => (b.onclick = guard(async () => {
+    if (!confirm('حذف الربط؟ الطلبيات اللي دخلت تبقى.')) return;
+    await api('DELETE', `/lightfunnels/${b.dataset.lfDel}`);
+    router();
+  })));
   main.querySelector('#add').onclick = () => sheetForm(null, stores);
   main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => sheetForm(sheets.find((g) => g.id === Number(b.dataset.edit)), stores)));
   main.querySelectorAll('[data-sync]').forEach((b) => (b.onclick = guard(async () => {
@@ -1583,6 +1612,24 @@ async function sheetsPage() {
     toast(`دخلو ${r.imported} طلبية${r.errors.length ? `، ${r.errors.length} أخطاء` : ''}`, r.errors.length > 0);
     router();
   })));
+}
+
+// A LightFunnels account is connected to one store; the products of its orders are matched in that store.
+function lfForm(stores) {
+  const box = modal.open(`
+    <h3>ربط حساب LightFunnels</h3>
+    <form class="stack" id="lf-form">
+      <label>الاسم<input name="name" placeholder="yacine boutique" required></label>
+      <label>البوتيك<select name="store_id"><option value="">—</option>${stores.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></label>
+      <p class="muted">من بعد "حفظ" تضغط "ربط": تتفتح صفحة LightFunnels، توافق على التطبيق وترجع للـ ERP.</p>
+      <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إلغاء</button></div>
+    </form>`);
+  box.querySelector('#lf-form').onsubmit = guard(async (e) => {
+    e.preventDefault();
+    await api('POST', '/lightfunnels', formData(e.target));
+    modal.close();
+    router();
+  });
 }
 
 function sheetForm(sheet, stores) {

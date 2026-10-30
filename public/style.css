@@ -75,6 +75,7 @@ td.num { font-variant-numeric: tabular-nums; }
 .badge.dispatched { background: #e0f2fe; color: #0369a1; }
 .badge.delivered { background: #dcfce7; color: #15803d; }
 .badge.returned { background: #fce7f3; color: #be185d; }
+.badge.ok { background: #dcfce7; color: #15803d; }
 .badge.fake { background: #f1f5f9; color: #475569; text-decoration: line-through; }
 .badge.warn { background: #fef3c7; color: var(--warn); }
 
@@ -159,6 +160,7 @@ a.wa { color: #16a34a; text-decoration: none; font-size: 14px; }
 .src { display: inline-flex; color: #fff; background: #16a34a; border-radius: 6px; padding: 3px; }
 .src.abandoned { background: #f97316; }
 .src.landing { background: #2563eb; }
+.src.lightfunnels { background: #0ea5e9; }
 .src.manual { background: #64748b; }
 .tag { display: inline-block; font-size: 10px; background: #0b4f4a; color: #fff; border-radius: 4px; padding: 0 4px; }
 .tag.warn { background: #f59e0b; color: #111; }

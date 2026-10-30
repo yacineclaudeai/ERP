@@ -797,3 +797,72 @@ test('orders are given to agents; failed twice, they go to the product\'s second
   await api('PUT', '/api/orders/agents', { auto_transfer_after: 0 });
   assert.equal((await api('GET', '/api/orders/agents')).body.auto_transfer_after, 0);
 });
+
+test('LightFunnels app: signed webhooks import orders once, bad ones are kept with the reason', async () => {
+  const crypto = await import('node:crypto');
+  process.env.LF_CLIENT_ID = 'test-client';
+  process.env.LF_CLIENT_SECRET = 'test-secret';
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const store = (await api('POST', '/api/stores', { name: 'Boutique LF Probe' })).body;
+  const link = (await api('POST', '/api/lightfunnels', { name: 'compte test', store_id: store.id })).body;
+  const list = (await api('GET', '/api/lightfunnels')).body;
+  assert.equal(list.configured, true);
+  assert.equal(list.links[0].connected, false);
+
+  const send = (topic, payload, { sign = true } = {}) => {
+    const raw = JSON.stringify(payload);
+    const mac = crypto.createHmac('sha256', 'test-secret').update(raw).digest('base64');
+    return fetch(`${base}/api/public/lightfunnels/${link.id}/${topic}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(sign ? { 'lightfunnels-hmac': mac } : {}) }, body: raw,
+    });
+  };
+  const node = (extra = {}) => ({
+    node: {
+      id: 'order_abc', _id: 4101, name: '#LF4101', total: 4900, subtotal: 4400, shipping: 500, test: false,
+      customer: { full_name: 'Client Test' },
+      shipping_address: { first_name: 'Client', last_name: 'Test', phone: '0551990011', address1: 'Rue 1', city: 'Bab Ezzouar', state: 'Alger' },
+      items: [{ title: 'LF Probe Item', price: 2200, quantity: 2 }],
+      ...extra,
+    },
+  });
+
+  assert.equal((await send('created', node(), { sign: false })).status, 403, 'unsigned calls are refused');
+  assert.equal((await send('created', node())).status, 200);
+  let orders = (await api('GET', '/api/orders?q=0551990011')).body.rows;
+  assert.equal(orders.length, 1);
+  assert.deepEqual([orders[0].source, orders[0].quantity, orders[0].unit_price, orders[0].delivery_fee, orders[0].total, orders[0].wilaya_code],
+    ['lightfunnels', 2, 2200, 500, 4900, 16]);
+  assert.equal(orders[0].store_name, 'Boutique LF Probe');
+
+  // The same order again: nothing new. "confirmed" brings the upsell and fills the untouched order.
+  await send('created', node());
+  assert.equal((await api('GET', '/api/orders?q=0551990011')).body.total, 1);
+  const upsell = node();
+  upsell.node.items.push({ title: 'LF Probe Upsell', price: 900, quantity: 1 });
+  upsell.node.total = 5800;
+  await send('confirmed', upsell);
+  orders = (await api('GET', '/api/orders?q=0551990011')).body.rows;
+  assert.equal(orders.length, 1);
+  assert.equal(orders[0].items.length, 1);
+  assert.equal(orders[0].total, 5800);
+
+  // Unreadable orders (unknown wilaya) are not lost: the event keeps the reason.
+  const bad = node({ _id: 4102, id: 'order_bad', shipping_address: { first_name: 'A', phone: '0551990022', state: 'Nowhere' } });
+  assert.equal((await send('created', bad)).status, 200);
+  assert.equal((await api('GET', '/api/orders?q=0551990022')).body.total, 0);
+  const events = (await api('GET', '/api/lightfunnels')).body.events;
+  assert.ok(events.some((e) => e.status === 'error' && /ولاية/.test(e.error)));
+  assert.ok(events.some((e) => e.status === 'imported'));
+  // A test order from LightFunnels is ignored.
+  await send('created', node({ _id: 4103, id: 'order_test', test: true }));
+  assert.equal((await api('GET', '/api/orders?q=0551990011')).body.total, 1);
+
+  // The connect link points at LightFunnels with a signed state.
+  const res = await fetch(`${base}/api/lightfunnels/${link.id}/connect`, { redirect: 'manual', headers: { cookie } });
+  const loc = new URL(res.headers.get('location'));
+  assert.equal(loc.origin + loc.pathname, 'https://app.lightfunnels.com/admin/oauth');
+  assert.equal(loc.searchParams.get('client_id'), 'test-client');
+  assert.equal(loc.searchParams.get('scope'), 'orders,products,stores');
+  delete process.env.LF_CLIENT_ID;
+  delete process.env.LF_CLIENT_SECRET;
+});
