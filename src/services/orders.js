@@ -255,11 +255,11 @@ export async function applyAction(db, id, action, { userId = null, note = null, 
         await t.run(`UPDATE orders SET status = 'no_answer', call_attempts = call_attempts + 1,
           updated_at = now() WHERE id = ?`, id);
         await logEvent(t, id, 'no_answer', note || `محاولة ${order.call_attempts + 1}`, userId);
-        // Failed too many times with this agent: the next agent gets it as a new order.
+        // Every `limit` failed calls the order goes down the product's chain of
+        // agents chosen by the admin: second agent, then third agent.
         const limit = Number(await getSetting(t, 'auto_transfer_after')) || 0;
-        // Every `limit` failed calls the order moves to the next agent.
-      if (limit && order.assigned_to && (order.call_attempts + 1) % limit === 0) {
-          const next = await nextAgent(t, order.assigned_to);
+        if (limit && order.assigned_to && (order.call_attempts + 1) % limit === 0) {
+          const next = await nextProductAgent(t, order.product_id, order.assigned_to);
           if (next) await transferOrder(t, order, next, `الفاشلة ${order.call_attempts + 1}`);
         }
         break;
@@ -316,19 +316,16 @@ export async function applyAction(db, id, action, { userId = null, note = null, 
   });
 }
 
-// Confirmation agents (non-admin accounts allowed to confirm), in a fixed order.
-async function confirmationAgents(db) {
-  return (await db.all("SELECT id, username, permissions FROM users WHERE role = 'agent' ORDER BY id"))
-    .filter((u) => String(u.permissions || '').split(',').includes('confirm'));
+// The product's agent after this one: the second, then the third; null at
+// the end of the chain or when the admin chose none.
+async function nextProductAgent(db, productId, currentId) {
+  const p = await db.get('SELECT backup_agent_id, third_agent_id FROM products WHERE id = ?', productId);
+  const chain = [...new Set([p?.backup_agent_id, p?.third_agent_id].filter(Boolean))];
+  const nextId = chain[chain.indexOf(currentId) + 1];
+  return nextId ? db.get('SELECT id, username FROM users WHERE id = ?', nextId) : null;
 }
 
-// The agent after this one, in turn; null when there is no other agent.
-async function nextAgent(db, currentId) {
-  const agents = (await confirmationAgents(db)).filter((u) => u.id !== currentId);
-  return agents.find((u) => u.id > currentId) || agents[0] || null;
-}
-
-// Gives the order to another agent as a new order: attempts start again.
+// Gives the order to another agent.
 // asNew starts it again as a new order; otherwise it keeps its failed count
 // (الفاشلة N) so the next agent sees it.
 async function transferOrder(db, order, to, reason, { asNew = false } = {}) {

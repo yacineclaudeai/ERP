@@ -134,6 +134,14 @@ export function apiRouter(db) {
       if (companyId && !await db.get('SELECT id FROM delivery_companies WHERE id = ?', companyId)) throw new HttpError(404, 'الشركة غير موجودة');
       await db.run('UPDATE products SET company_id = ? WHERE id = ?', companyId, id);
     }
+    // The second and third confirmation agents (admin only): failed orders go to them.
+    for (const key of ['backup_agent_id', 'third_agent_id']) {
+      if (b[key] === undefined) continue;
+      if (c.get('user').role !== 'admin') throw new HttpError(403, 'غير المدير');
+      const agentId = b[key] ? Number(b[key]) : null;
+      if (agentId && !await db.get('SELECT id FROM users WHERE id = ?', agentId)) throw new HttpError(404, 'المستخدم غير موجود');
+      await db.run(`UPDATE products SET ${key} = ? WHERE id = ?`, agentId, id);
+    }
     return c.json({ orders: await rerouteProductOrders(db, id) });
   });
 

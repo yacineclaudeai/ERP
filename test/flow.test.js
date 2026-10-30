@@ -711,7 +711,7 @@ test('an accountant sees the profit of the stores ticked for them only', async (
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
 });
 
-test('orders are given to agents; failed twice, they go to the next agent (still الفاشلة 2)', async () => {
+test('orders are given to agents; failed twice, they go to the product\'s second agent (still الفاشلة 2)', async () => {
   const p = (await api('POST', '/api/products', { name: 'Assign item', price: 1000, stock: 5 })).body;
   await api('POST', '/api/users', { username: 'sara', password: 'secret1', role: 'agent', permissions: ['confirm'] });
   await api('POST', '/api/users', { username: 'amina', password: 'secret1', role: 'agent', permissions: ['confirm'] });
@@ -720,6 +720,27 @@ test('orders are given to agents; failed twice, they go to the next agent (still
   const amina = users.find((u) => u.username === 'amina');
   const mk = async (phone) => (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'A', phone, wilaya_code: 16 })).body;
   const [o1, o2, o3] = [await mk('0551770201'), await mk('0551770202'), await mk('0551770203')];
+  // No second agent on this product: a failed order stays with its agent.
+  const lone = (await api('POST', '/api/products', { name: 'Lone item', price: 1000, stock: 5 })).body;
+  const o4 = (await api('POST', '/api/orders', { product_id: lone.id, customer_name: 'A', phone: '0551770204', wilaya_code: 16 })).body;
+  await api('POST', '/api/orders/assign', { ids: [o4.id], user_id: sara.id });
+  for (let i = 0; i < 2; i++) await api('POST', `/api/orders/${o4.id}/action`, { action: 'no_answer' });
+  assert.equal((await api('GET', `/api/orders/${o4.id}`)).body.assigned_to, sara.id);
+  await api('POST', '/api/orders/assign', { ids: [o4.id], user_id: null });
+  assert.equal((await api('PUT', `/api/products/${p.id}/store`, { backup_agent_id: amina.id })).status, 200);
+  // Chain: the order with sara goes to the second agent (amina), then to the third (nour).
+  await api('POST', '/api/users', { username: 'nour', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  const nour = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'nour');
+  await api('PUT', `/api/products/${lone.id}/store`, { backup_agent_id: amina.id, third_agent_id: nour.id });
+  const o5 = (await api('POST', '/api/orders', { product_id: lone.id, customer_name: 'A', phone: '0551770205', wilaya_code: 16 })).body;
+  await api('POST', '/api/orders/assign', { ids: [o5.id], user_id: sara.id });
+  const holders = [];
+  for (let i = 0; i < 6; i++) {
+    await api('POST', `/api/orders/${o5.id}/action`, { action: 'no_answer' });
+    holders.push((await api('GET', `/api/orders/${o5.id}`)).body.assigned_to);
+  }
+  assert.deepEqual(holders, [sara.id, amina.id, amina.id, nour.id, nour.id, nour.id]);
+  await api('DELETE', `/api/orders/${o5.id}`);
   assert.equal((await api('POST', '/api/orders/assign', { ids: [o1.id, o2.id], user_id: sara.id })).body.assigned, 2);
   assert.equal((await api('GET', `/api/orders?assigned_to=${sara.id}`)).body.total, 2);
   assert.ok((await api('GET', '/api/orders?assigned_to=none')).body.rows.some((x) => x.id === o3.id));
@@ -749,6 +770,9 @@ test('orders are given to agents; failed twice, they go to the next agent (still
   assert.equal((await api('GET', '/api/orders?status=failed_1')).body.total, 0);
   await api('POST', `/api/orders/${o1.id}/action`, { action: 'no_answer' });
   assert.equal((await api('GET', '/api/orders?status=failed_3')).body.total, 1, 'الفاشلة 3 stays with amina');
+  await api('POST', `/api/orders/${o1.id}/action`, { action: 'no_answer' });
+  assert.equal((await api('GET', `/api/orders/${o1.id}`)).body.assigned_to, amina.id, 'no third agent: stays with amina');
+  await api('POST', `/api/orders/${o1.id}/action`, { action: 'unfail' });
   await api('POST', `/api/orders/${o1.id}/action`, { action: 'set_failed', attempts: 1 });
   assert.equal((await api('GET', `/api/orders/${o1.id}`)).body.call_attempts, 1, 'back to الفاشلة 1');
   assert.equal((await api('POST', `/api/orders/${o1.id}/action`, { action: 'set_failed', attempts: 9 })).status, 400);

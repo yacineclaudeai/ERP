@@ -488,7 +488,7 @@ async function ordersPage(mode = 'confirm') {
       <label class="check"><input type="checkbox" id="assign-new"> كطلبيات جديدة (المحاولات ترجع 0)</label>
       <button class="btn small primary" id="assign-go">عطيهم</button>` : ''}</div>
     ${assigning ? `<div class="bar muted">
-      <label class="check">الفاشلة تتحول وحدها للمؤكدة الأخرى بعد
+      <label class="check">الفاشلة تتحول وحدها لـ"المؤكدة 2" ومن بعد "المؤكدة 3" تاع المنتج (تختارهم في صفحة المنتجات) بعد كل
         <input id="auto-transfer" type="number" min="0" max="20" value="${team.auto_transfer_after}" style="width:60px"> فاشلات (مثلا 2: بعد الفاشلة 2 والفاشلة 4) — 0 = لا</label>
       ${team.agents.length ? '' : '<span class="neg">مازال ما زدت حتى مؤكدة (صفحة المستخدمين)</span>'}</div>` : ''}
     <div class="top-scroll" id="top-scroll"><div></div></div>
@@ -1211,8 +1211,10 @@ function accountingCard(a, p) {
 
 // ---------- products ----------
 async function productsPage() {
-  const [products, stores, companies] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies')]);
+  const [products, stores, companies, team] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies'),
+    isAdminUser() ? api('GET', '/orders/agents') : null]);
   const isAdmin = can('products');
+  const agents = team ? team.agents.map((u) => ({ id: u.id, name: u.username })) : [];
   const select = (field, list, selected, empty) => `<select class="cell" data-product-field="${field}" data-orig="${selected ?? ''}"><option value="">${empty}</option>
     ${list.map((x) => `<option value="${x.id}" ${x.id === selected ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
   const main = shell(`
@@ -1221,12 +1223,14 @@ async function productsPage() {
       <button class="btn primary hidden" id="save-all"></button>
       <button class="btn" id="link-stores" title="يقرا الطرود اللي بعثها كل فرع عند شركة التوصيل تاعو، ويعرف منها كل منتج لأنهي فرع">ربط المنتجات بالفروع تلقائياً</button></div>` : ''}
     <div class="table-wrap"><table>
-      <tr><th>المنتج</th><th>البوتيك</th><th>شركة التوصيل</th><th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
+      <tr><th>المنتج</th><th>البوتيك</th><th>شركة التوصيل</th>${team ? '<th title="الفاشلة تاع هاد المنتج تروح للمؤكدة 2، ومن بعد للمؤكدة 3">المؤكدة 2</th><th>المؤكدة 3</th>' : ''}<th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
       ${products.map((p) => `<tr data-product="${p.id}">
         <td>${esc(p.name)} ${p.sku ? `<span class="muted">${esc(p.sku)}</span>` : ''} ${p.active ? '' : '<span class="badge">موقف</span>'}</td>
         <td>${isAdmin ? select('store_id', stores, p.store_id, '— بلا بوتيك —') : esc(p.store_name || '—')}</td>
         <td>${isAdmin ? select('company_id', companies, p.company_id, `نفس البوتيك${p.company_from_store && p.company_name ? ` (${esc(p.company_name)})` : ''}`)
           : esc(p.company_name || '—')}</td>
+        ${team ? `<td>${select('backup_agent_id', agents, p.backup_agent_id, '— بلا —')}</td>
+          <td>${select('third_agent_id', agents, p.third_agent_id, '— بلا —')}</td>` : ''}
         <td class="num">${money(p.price)}</td><td class="num">${money(p.cost)}</td>
         <td class="num ${p.stock <= 5 ? 'neg' : ''}">${p.stock}</td>
         <td>${p.landing_url ? `<a href="${esc(p.landing_url)}" target="_blank" rel="noopener">فتح</a>` : '<span class="muted">—</span>'}</td>
