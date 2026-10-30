@@ -280,3 +280,4 @@ a { color: #0b4f22; font-weight: 800; }
 .multi-box { position: absolute; z-index: 20; top: 100%; right: 0; width: min(420px, 90vw); background: #fff; border: 2px solid var(--brand-dark); border-radius: 10px; padding: 10px; box-shadow: var(--shadow); display: grid; gap: 8px; }
 .multi-list { max-height: 320px; overflow: auto; display: grid; gap: 4px; }
 .multi-list label.hidden { display: none; }
+.perm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 12px; }

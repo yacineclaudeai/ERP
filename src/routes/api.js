@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import { Hono } from 'hono';
 import { getSetting, setSetting } from '../db.js';
-import { hashPassword, verifyPassword, setSession, clearSession, authMiddleware, requireAdmin } from '../auth.js';
+import {
+  hashPassword, verifyPassword, setSession, clearSession, authMiddleware, requireAdmin, requirePerm, can, publicUser, parsePermissions, PERMISSIONS,
+} from '../auth.js';
 import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
 import {
@@ -45,7 +47,7 @@ export function apiRouter(db) {
       return c.json({ error: 'اسم المستخدم أو كلمة السر غير صحيحة' }, 401);
     }
     setSession(c, user);
-    return c.json({ id: user.id, username: user.username, role: user.role });
+    return c.json(publicUser(user));
   });
   r.post('/auth/logout', (c) => {
     clearSession(c);
@@ -80,7 +82,7 @@ export function apiRouter(db) {
     ad_creative_folder: b.ad_creative_folder ? String(b.ad_creative_folder).trim() : null,
   });
 
-  r.post('/products', requireAdmin, async (c) => {
+  r.post('/products', requirePerm('products'), async (c) => {
     const f = productFields(body(c));
     if (!f.name) throw new HttpError(400, 'اسم المنتج ضروري');
     // A new product is a test until the user moves it to a real store.
@@ -99,7 +101,7 @@ export function apiRouter(db) {
     return c.json(product, 201);
   });
 
-  r.put('/products/:id', requireAdmin, async (c) => {
+  r.put('/products/:id', requirePerm('products'), async (c) => {
     const id = idParam(c);
     const b = body(c);
     const f = productFields(b);
@@ -118,7 +120,7 @@ export function apiRouter(db) {
 
   // Move a product to a store (branch) and/or delivery company from the orders
   // table; its open orders follow.
-  r.put('/products/:id/store', requireAdmin, async (c) => {
+  r.put('/products/:id/store', requirePerm('products'), async (c) => {
     const id = idParam(c);
     const b = body(c);
     if (!await db.get('SELECT id FROM products WHERE id = ?', id)) throw new HttpError(404, 'المنتج غير موجود');
@@ -136,20 +138,20 @@ export function apiRouter(db) {
   });
 
   // Link products to stores from the parcels each store already shipped.
-  r.post('/branches/scan', requireAdmin, async (c) => {
+  r.post('/branches/scan', requirePerm('products'), async (c) => {
     const b = body(c);
     return c.json(await scanStore(db, Number(b.store_id), Math.max(1, Number(b.page) || 1)));
   });
-  r.post('/branches/apply', requireAdmin, async (c) => c.json(await applyStoreLinks(db, body(c).texts)));
+  r.post('/branches/apply', requirePerm('products'), async (c) => c.json(await applyStoreLinks(db, body(c).texts)));
 
-  r.post('/products/:id/regenerate-key', requireAdmin, async (c) => {
+  r.post('/products/:id/regenerate-key', requirePerm('products'), async (c) => {
     const { rows: [p] } = await db.run('UPDATE products SET public_key = ? WHERE id = ? RETURNING *', newKey(), idParam(c));
     if (!p) throw new HttpError(404, 'المنتج غير موجود');
     return c.json(p);
   });
 
   // Stock in (new purchase) or correction. quantity may be negative.
-  r.post('/products/:id/stock', requireAdmin, async (c) => {
+  r.post('/products/:id/stock', requirePerm('products'), async (c) => {
     const id = idParam(c);
     const qty = Math.floor(Number(body(c).quantity));
     if (!qty) throw new HttpError(400, 'الكمية ضرورية');
@@ -168,14 +170,26 @@ export function apiRouter(db) {
     WHERE m.product_id = ? ORDER BY m.id DESC LIMIT 200`, idParam(c))));
 
   // ---- orders ----
-  r.get('/orders', async (c) => {
+  // Orders: the confirmation page and the tracking page each need their own permission.
+  const CONFIRM_STATUSES = ['new', 'no_answer', 'postponed', 'cancelled', 'fake'];
+  const TRACKING_STATUSES = ['confirmed', 'dispatched', 'delivered', 'returned'];
+  const TRACKING_ACTIONS = ['delivered', 'returned', 'return_received'];
+  const ordersAccess = requirePerm('confirm', 'tracking');
+  const allowedStatuses = (user) => [
+    ...(can(user, 'confirm') ? CONFIRM_STATUSES : []), ...(can(user, 'tracking') ? TRACKING_STATUSES : []),
+  ];
+  const checkOrderAccess = async (user, id) => {
+    if (!allowedStatuses(user).includes((await getOrder(db, id)).status)) throw new HttpError(403, 'ما عندكش الصلاحية على هاد الطلبية');
+  };
+
+  r.get('/orders', ordersAccess, async (c) => {
     const q = c.req.query();
     const where = [];
     const args = [];
-    if (q.status) {
-      const list = String(q.status).split(',').filter((s) => STATUSES.includes(s));
-      if (list.length) where.push(`o.status IN (${list.map(() => '?').join(',')})`), args.push(...list);
-    }
+    const allowed = allowedStatuses(c.get('user'));
+    const asked = q.status ? String(q.status).split(',').filter((s) => STATUSES.includes(s)) : [];
+    const list = (asked.length ? asked : allowed).filter((s) => allowed.includes(s));
+    if (list.length < STATUSES.length) where.push(`o.status IN (${list.map(() => '?').join(',') || 'NULL'})`), args.push(...list);
     if (Number(q.product_id)) where.push('o.product_id = ?'), args.push(Number(q.product_id));
     if (Number(q.store_id)) where.push('p.store_id = ?'), args.push(Number(q.store_id));
     if (Number(q.wilaya)) where.push('o.wilaya_code = ?'), args.push(Number(q.wilaya));
@@ -206,7 +220,15 @@ export function apiRouter(db) {
     return c.json({ rows, total });
   });
 
-  r.get('/orders/:id', async (c) => {
+  // How many orders in each status, for the tabs of the orders pages.
+  r.get('/orders/counts', ordersAccess, async (c) => {
+    const allowed = allowedStatuses(c.get('user'));
+    const rows = await db.all('SELECT status, COUNT(*) AS n FROM orders GROUP BY status');
+    return c.json({ by_status: Object.fromEntries(rows.filter((x) => allowed.includes(x.status)).map((x) => [x.status, x.n])) });
+  });
+
+  r.get('/orders/:id', ordersAccess, async (c) => {
+    await checkOrderAccess(c.get('user'), idParam(c));
     const order = await getOrder(db, idParam(c));
     const events = await db.all(`
       SELECT e.*, u.username FROM order_events e LEFT JOIN users u ON u.id = e.user_id
@@ -214,22 +236,28 @@ export function apiRouter(db) {
     return c.json({ ...order, events });
   });
 
-  r.post('/orders', async (c) => c.json(await createOrder(db, body(c), { source: 'manual', userId: c.get('user').id }), 201));
+  r.post('/orders', requirePerm('confirm'), async (c) => c.json(await createOrder(db, body(c), { source: 'manual', userId: c.get('user').id }), 201));
 
   r.delete('/orders/:id', requireAdmin, async (c) => c.json(await deleteOrder(db, idParam(c))));
 
-  r.put('/orders/:id', async (c) => c.json(await updateOrder(db, idParam(c), body(c), c.get('user').id)));
+  r.put('/orders/:id', ordersAccess, async (c) => {
+    await checkOrderAccess(c.get('user'), idParam(c));
+    return c.json(await updateOrder(db, idParam(c), body(c), c.get('user').id));
+  });
 
-  r.post('/orders/:id/action', async (c) => {
+  r.post('/orders/:id/action', ordersAccess, async (c) => {
     const id = idParam(c);
     const b = body(c);
+    if (!can(c.get('user'), TRACKING_ACTIONS.includes(String(b.action)) ? 'tracking' : 'confirm')) {
+      throw new HttpError(403, 'ما عندكش الصلاحية');
+    }
     const opts = { userId: c.get('user').id, note: b.note || null };
     return c.json(b.action === 'confirm'
       ? await confirmAndDispatch(db, id, opts)
       : await applyAction(db, id, String(b.action), opts));
   });
 
-  r.post('/orders/:id/back', async (c) => {
+  r.post('/orders/:id/back', requirePerm('tracking'), async (c) => {
     const id = idParam(c);
     // Removing a parcel at the delivery company is for admins only.
     if ((await getOrder(db, id)).status === 'dispatched' && c.get('user').role !== 'admin') {
@@ -239,12 +267,12 @@ export function apiRouter(db) {
   });
 
   // Retry a failed dispatch, or record a tracking number by hand.
-  r.post('/orders/:id/dispatch', async (c) => c.json(await dispatchOrder(db, idParam(c), {
+  r.post('/orders/:id/dispatch', requirePerm('tracking'), async (c) => c.json(await dispatchOrder(db, idParam(c), {
     userId: c.get('user').id,
     tracking: body(c).tracking ? String(body(c).tracking).trim() : null,
   })));
 
-  r.post('/orders/sync-tracking', async (c) => c.json(await syncTracking(db)));
+  r.post('/orders/sync-tracking', requirePerm('tracking'), async (c) => c.json(await syncTracking(db)));
 
   // ---- delivery companies & routing ----
   r.get('/delivery/companies', async (c) => {
@@ -260,7 +288,7 @@ export function apiRouter(db) {
     return { name, provider, base_url: b.base_url ? String(b.base_url).trim() : null, active: b.active !== false };
   };
 
-  r.post('/delivery/companies', requireAdmin, async (c) => {
+  r.post('/delivery/companies', requirePerm('delivery'), async (c) => {
     const f = companyFields(body(c));
     const { rows: [{ id }] } = await db.run(`
       INSERT INTO delivery_companies (name, provider, base_url, api_token, active) VALUES (?, ?, ?, ?, ?) RETURNING id`,
@@ -269,7 +297,7 @@ export function apiRouter(db) {
     return c.json({ id }, 201);
   });
 
-  r.put('/delivery/companies/:id', requireAdmin, async (c) => {
+  r.put('/delivery/companies/:id', requirePerm('delivery'), async (c) => {
     const f = companyFields(body(c));
     // An empty token field means "keep the current one".
     const token = body(c).api_token ? String(body(c).api_token) : undefined;
@@ -294,7 +322,7 @@ export function apiRouter(db) {
     });
   });
 
-  r.put('/delivery/routes', requireAdmin, async (c) => {
+  r.put('/delivery/routes', requirePerm('delivery'), async (c) => {
     const { routes = [], default_company_id, auto_dispatch } = body(c);
     await db.tx(async (t) => {
       for (const x of routes) {
@@ -381,30 +409,30 @@ export function apiRouter(db) {
     });
   };
 
-  r.put('/stores/new-products', requireAdmin, async (c) => {
+  r.put('/stores/new-products', requirePerm('stores'), async (c) => {
     const id = Number(body(c).store_id) || null;
     if (id && !await db.get('SELECT id FROM stores WHERE id = ?', id)) throw new HttpError(404, 'البوتيك غير موجودة');
     await setSetting(db, 'new_product_store_id', id ? String(id) : null);
     return c.json({ ok: true });
   });
-  r.post('/stores', requireAdmin, async (c) => c.json({ id: await saveStore(null, body(c)) }, 201));
-  r.put('/stores/:id', requireAdmin, async (c) => {
+  r.post('/stores', requirePerm('stores'), async (c) => c.json({ id: await saveStore(null, body(c)) }, 201));
+  r.put('/stores/:id', requirePerm('stores'), async (c) => {
     const id = await saveStore(idParam(c), body(c));
     // A store that changed company takes its unsent orders along.
     for (const p of await db.all('SELECT id FROM products WHERE store_id = ?', id)) await rerouteProductOrders(db, p.id);
     return c.json({ id });
   });
-  r.delete('/stores/:id', requireAdmin, async (c) => {
+  r.delete('/stores/:id', requirePerm('stores'), async (c) => {
     await db.run('DELETE FROM stores WHERE id = ?', idParam(c));
     return c.json({ ok: true });
   });
 
   // ---- Google Sheets order sources ----
-  r.get('/sheets', requireAdmin, async (c) => c.json(await db.all(`
+  r.get('/sheets', requirePerm('sheets'), async (c) => c.json(await db.all(`
     SELECT g.*, s.name AS store_name FROM sheet_sources g LEFT JOIN stores s ON s.id = g.store_id ORDER BY g.id`)));
 
   // Reads the sheet's header row so the UI can map columns; start_row defaults to the next new row.
-  r.post('/sheets/preview', requireAdmin, async (c) => {
+  r.post('/sheets/preview', requirePerm('sheets'), async (c) => {
     const rows = await fetchSheetRows(body(c).sheet_url);
     const headers = rows[0] || [];
     return c.json({ headers, rows: rows.length, next_row: rows.length + 1, mapping: suggestMapping(headers), fields: Object.keys(SHEET_FIELDS) });
@@ -419,13 +447,13 @@ export function apiRouter(db) {
     return [name, sheetUrl, b.store_id ? Number(b.store_id) : null, ['fake', 'abandoned'].includes(b.kind) ? b.kind : 'real',
       JSON.stringify(mapping), Math.max(2, Math.floor(Number(b.start_row)) || 2), b.active !== false && b.active !== 'false'];
   };
-  r.post('/sheets', requireAdmin, async (c) => {
+  r.post('/sheets', requirePerm('sheets'), async (c) => {
     const { rows } = await db.run(`INSERT INTO sheet_sources (name, sheet_url, store_id, kind, mapping, start_row, active)
       VALUES (?, ?, ?, ?, ?::jsonb, ?, ?) RETURNING id`, ...sheetInput(body(c)));
     return c.json({ id: rows[0].id }, 201);
   });
   // Changing the start row restarts reading from there; rows already imported are never imported twice.
-  r.put('/sheets/:id', requireAdmin, async (c) => {
+  r.put('/sheets/:id', requirePerm('sheets'), async (c) => {
     const id = idParam(c);
     const old = await db.get('SELECT start_row FROM sheet_sources WHERE id = ?', id);
     if (!old) throw new HttpError(404, 'الشيت غير موجود');
@@ -434,22 +462,22 @@ export function apiRouter(db) {
       ${v[5] !== old.start_row ? ', last_row = 0' : ''} WHERE id = ?`, ...v, id);
     return c.json({ id });
   });
-  r.delete('/sheets/:id', requireAdmin, async (c) => {
+  r.delete('/sheets/:id', requirePerm('sheets'), async (c) => {
     await db.run('DELETE FROM sheet_sources WHERE id = ?', idParam(c));
     return c.json({ ok: true });
   });
-  r.post('/sheets/:id/sync', requireAdmin, async (c) => {
+  r.post('/sheets/:id/sync', requirePerm('sheets'), async (c) => {
     const source = await db.get('SELECT * FROM sheet_sources WHERE id = ?', idParam(c));
     if (!source) throw new HttpError(404, 'الشيت غير موجود');
     return c.json(await syncSheet(db, source));
   });
 
   // ---- ad spend (Meta Ads etc.) ----
-  r.get('/ad-spend', async (c) => c.json(await db.all(`
+  r.get('/ad-spend', requirePerm('ads', 'accounting'), async (c) => c.json(await db.all(`
     SELECT a.*, p.name AS product_name FROM ad_spend a JOIN products p ON p.id = a.product_id
     ORDER BY a.date DESC, a.id DESC LIMIT 300`)));
 
-  r.post('/ad-spend', requireAdmin, async (c) => {
+  r.post('/ad-spend', requirePerm('ads'), async (c) => {
     const b = body(c);
     const date = String(b.date || '').slice(0, 10);
     const amount = Number(b.amount);
@@ -460,27 +488,27 @@ export function apiRouter(db) {
     return c.json({ ok: true });
   });
 
-  r.delete('/ad-spend/:id', requireAdmin, async (c) => {
+  r.delete('/ad-spend/:id', requirePerm('ads'), async (c) => {
     await db.run('DELETE FROM ad_spend WHERE id = ?', idParam(c));
     return c.json({ ok: true });
   });
 
   // ---- ad campaigns (read and written by the launch routine with AUTOMATION_TOKEN) ----
-  r.get('/ads/settings', async (c) => c.json(await getAdSettings(db)));
-  r.put('/ads/settings', requireAdmin, async (c) => c.json(await saveAdSettings(db, body(c))));
-  r.get('/ads/plan', async (c) => c.json(await getAdPlan(db)));
-  r.get('/ads/campaigns', async (c) => c.json(await listAdCampaigns(db)));
-  r.post('/ads/campaigns', requireAdmin, async (c) => c.json(await recordAdCampaign(db, body(c)), 201));
-  r.patch('/ads/campaigns/:id', requireAdmin, async (c) => c.json(await updateAdCampaign(db, idParam(c), body(c))));
+  r.get('/ads/settings', requirePerm('ads'), async (c) => c.json(await getAdSettings(db)));
+  r.put('/ads/settings', requirePerm('ads'), async (c) => c.json(await saveAdSettings(db, body(c))));
+  r.get('/ads/plan', requirePerm('ads'), async (c) => c.json(await getAdPlan(db)));
+  r.get('/ads/campaigns', requirePerm('ads'), async (c) => c.json(await listAdCampaigns(db)));
+  r.post('/ads/campaigns', requirePerm('ads'), async (c) => c.json(await recordAdCampaign(db, body(c)), 201));
+  r.patch('/ads/campaigns/:id', requirePerm('ads'), async (c) => c.json(await updateAdCampaign(db, idParam(c), body(c))));
 
   // ---- stats ----
-  r.get('/stats', async (c) => {
+  r.get('/stats', requirePerm('dashboard'), async (c) => {
     const { from, to } = c.req.query();
     const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
     return c.json(await getStats(db, { from: isDate(from) ? from : null, to: isDate(to) ? to : null }));
   });
 
-  r.get('/stats/:tab{confirmation|delivery}', async (c) => {
+  r.get('/stats/:tab{confirmation|delivery}', requirePerm('stats'), async (c) => {
     const q = c.req.query();
     const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
     const id = (v) => (Number(v) > 0 ? Number(v) : null);
@@ -492,31 +520,35 @@ export function apiRouter(db) {
   });
 
   // ---- accounting (profit of each product) ----
-  r.get('/accounting', requireAdmin, async (c) => c.json(await getAccounting(db)));
-  r.put('/accounting/defaults', requireAdmin, async (c) => c.json(await saveDefaults(db, body(c))));
-  r.put('/accounting/products/:id', requireAdmin, async (c) => {
+  r.get('/accounting', requirePerm('accounting'), async (c) => c.json(await getAccounting(db)));
+  r.put('/accounting/defaults', requirePerm('accounting'), async (c) => c.json(await saveDefaults(db, body(c))));
+  r.put('/accounting/products/:id', requirePerm('accounting'), async (c) => {
     await saveProductCosts(db, idParam(c), body(c));
     return c.json({ ok: true });
   });
-  r.post('/accounting/products/:id/expenses', requireAdmin, async (c) => {
+  r.post('/accounting/products/:id/expenses', requirePerm('accounting'), async (c) => {
     await addExpense(db, idParam(c), body(c));
     return c.json({ ok: true }, 201);
   });
-  r.delete('/accounting/expenses/:id', requireAdmin, async (c) => {
+  r.delete('/accounting/expenses/:id', requirePerm('accounting'), async (c) => {
     await deleteExpense(db, idParam(c));
     return c.json({ ok: true });
   });
-  r.post('/accounting/products/:id/purchases', requireAdmin, async (c) => {
+  r.post('/accounting/products/:id/purchases', requirePerm('accounting'), async (c) => {
     await addPurchase(db, idParam(c), body(c));
     return c.json({ ok: true }, 201);
   });
-  r.delete('/accounting/purchases/:id', requireAdmin, async (c) => {
+  r.delete('/accounting/purchases/:id', requirePerm('accounting'), async (c) => {
     await deletePurchase(db, idParam(c));
     return c.json({ ok: true });
   });
 
   // ---- users ----
-  r.get('/users', requireAdmin, async (c) => c.json(await db.all('SELECT id, username, role, created_at FROM users ORDER BY id')));
+  r.get('/users', requireAdmin, async (c) => c.json({
+    users: (await db.all('SELECT id, username, role, permissions, created_at FROM users ORDER BY id'))
+      .map((u) => ({ ...publicUser(u), created_at: u.created_at })),
+    permissions: PERMISSIONS,
+  }));
 
   r.post('/users', requireAdmin, async (c) => {
     const b = body(c);
@@ -524,7 +556,10 @@ export function apiRouter(db) {
     const password = String(b.password || '');
     const role = b.role === 'admin' ? 'admin' : 'agent';
     if (!username || password.length < 6) throw new HttpError(400, 'الاسم ضروري وكلمة السر 6 حروف على الأقل');
-    await db.run('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)', username, hashPassword(password), role);
+    const permissions = parsePermissions(Array.isArray(b.permissions) ? b.permissions.join(',') : b.permissions).join(',');
+    if (role === 'agent' && !permissions) throw new HttpError(400, 'اختار على الأقل صفحة وحدة يشوفها');
+    if (await db.get('SELECT id FROM users WHERE username = ?', username)) throw new HttpError(409, 'هاد الاسم كاين من قبل');
+    await db.run('INSERT INTO users (username, password_hash, role, permissions) VALUES (?, ?, ?, ?)', username, hashPassword(password), role, permissions);
     return c.json({ ok: true }, 201);
   });
 
@@ -535,6 +570,17 @@ export function apiRouter(db) {
     const password = String(body(c).password || '');
     if (password.length < 6) throw new HttpError(400, 'كلمة السر 6 حروف على الأقل');
     await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), id);
+    return c.json({ ok: true });
+  });
+
+  r.put('/users/:id/permissions', requireAdmin, async (c) => {
+    const b = body(c);
+    const id = idParam(c);
+    const role = b.role === 'admin' ? 'admin' : 'agent';
+    if (id === c.get('user').id && role !== 'admin') throw new HttpError(400, 'ما تقدرش تنحي المدير على روحك');
+    const permissions = parsePermissions(Array.isArray(b.permissions) ? b.permissions.join(',') : b.permissions).join(',');
+    if (role === 'agent' && !permissions) throw new HttpError(400, 'اختار على الأقل صفحة وحدة يشوفها');
+    await db.run('UPDATE users SET role = ?, permissions = ? WHERE id = ?', role, permissions, id);
     return c.json({ ok: true });
   });
 

@@ -83,19 +83,23 @@ const guard = (fn) => async (...args) => {
 };
 
 // ---------- layout & routing ----------
+// [page, label, permission needed]; 'admin' means admins only.
 const NAV = [
-  ['#/', 'لوحة التحكم'],
-  ['#/stats', 'الإحصائيات'],
-  ['#/orders', 'تأكيد الطلبيات'],
-  ['#/tracking', 'تتبع الطلبيات'],
-  ['#/products', 'المنتجات'],
-  ['#/accounting', 'الفايدة لكل منتج', 'admin'],
-  ['#/stores', 'البوتيكات', 'admin'],
-  ['#/sheets', 'الشيتات', 'admin'],
-  ['#/delivery', 'التوصيل', 'admin'],
-  ['#/ads', 'مصاريف الإشهار', 'admin'],
+  ['#/', 'لوحة التحكم', 'dashboard'],
+  ['#/stats', 'الإحصائيات', 'stats'],
+  ['#/orders', 'تأكيد الطلبيات', 'confirm'],
+  ['#/tracking', 'تتبع الطلبيات', 'tracking'],
+  ['#/products', 'المنتجات', 'products'],
+  ['#/accounting', 'الفايدة لكل منتج', 'accounting'],
+  ['#/stores', 'البوتيكات', 'stores'],
+  ['#/sheets', 'الشيتات', 'sheets'],
+  ['#/delivery', 'التوصيل', 'delivery'],
+  ['#/ads', 'مصاريف الإشهار', 'ads'],
   ['#/users', 'المستخدمين', 'admin'],
 ];
+const isAdminUser = () => state.user?.role === 'admin';
+const can = (perm) => isAdminUser() || (perm !== 'admin' && Boolean(state.user?.permissions?.includes(perm)));
+const roleLabel = (u) => (u.role === 'admin' ? 'مدير' : 'عامل');
 
 function shell(content) {
   const route = location.hash.split('?')[0] || '#/';
@@ -103,10 +107,10 @@ function shell(content) {
     <div class="layout">
       <nav class="side">
         <h1>ERP</h1>
-        ${NAV.filter(([, , role]) => !role || state.user.role === role)
+        ${NAV.filter(([, , perm]) => can(perm))
           .map(([href, label]) => `<a href="${href}" class="${route === href ? 'active' : ''}">${label}</a>`).join('')}
         <a href="#" id="logout">خروج</a>
-        <div class="who">${esc(state.user.username)} · ${state.user.role === 'admin' ? 'مدير' : 'مؤكدة'}</div>
+        <div class="who">${esc(state.user.username)} · ${roleLabel(state.user)}</div>
       </nav>
       <main class="main" id="main">${content}</main>
     </div>`;
@@ -144,6 +148,13 @@ async function router() {
     }
   }
   if (!state.meta) state.meta = await api('GET', '/meta');
+  // A page this account may not open sends it to its first allowed page.
+  const allowed = NAV.filter(([, , perm]) => can(perm));
+  const entry = NAV.find(([href]) => href === route) || NAV[0];
+  if (!can(entry[2])) {
+    if (!allowed.length) return (app.innerHTML = '<div class="card login"><h2>ما عندك حتى صفحة</h2><p>كلم المدير باش يعطيك الصلاحيات.</p></div>');
+    if (allowed[0][0] !== route) return (location.hash = allowed[0][0]);
+  }
   const page = ROUTES[route] || dashboardPage;
   try {
     await page();
@@ -428,7 +439,7 @@ async function ordersPage(mode = 'confirm') {
   const [list, products, stats, stores, companies] = await Promise.all([
     api('GET', `/orders?${new URLSearchParams({ ...query, status: f.status, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE })}`),
     api('GET', '/products'),
-    api('GET', '/stats'),
+    api('GET', '/orders/counts'),
     api('GET', '/stores'),
     api('GET', '/delivery/companies'),
   ]);
@@ -443,7 +454,6 @@ async function ordersPage(mode = 'confirm') {
   const hfilter = (label, key, options) => `<th class="hf"><select data-filter="${key}" class="${f[key] ? 'on' : ''}">
       <option value="">${label}</option>
       ${options.map(([v, l]) => `<option value="${v}" ${String(v) === f[key] ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></th>`;
-  const isAdmin = state.user.role === 'admin';
   const from = list.total ? (page - 1) * PAGE_SIZE + 1 : 0;
   const pages = Math.max(1, Math.ceil(list.total / PAGE_SIZE));
 
@@ -457,7 +467,7 @@ async function ordersPage(mode = 'confirm') {
       <button class="btn">بحث</button>
       ${ORDER_FILTERS.some((k) => !['status', 'page'].includes(k) && f[k]) ? '<button class="btn" type="button" id="clear">مسح الفلاتر</button>' : ''}
       ${mode === 'confirm' ? '<button class="btn primary" type="button" id="new-order">+ طلبية يدوية</button>' : ''}
-      ${isAdmin && mode === 'tracking' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
+      ${can('tracking') && mode === 'tracking' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
     </form>
     <div class="bulk hidden" id="bulk"><b id="bulk-n"></b>
       <select id="bulk-action"><option value="">تبديل الحالة للمحددين…</option>
@@ -626,7 +636,7 @@ function orderRow(o, products, companies, stores) {
       ${['new', 'no_answer', 'postponed'].includes(o.status) ? '<button class="plus" data-attempt title="ما ردش: زيد محاولة">+1</button>' : ''}</td>
     <td class="nowrap">${statusCell(o)}${o.dispatch_error ? `<div class="err" title="${esc(o.dispatch_error)}">خطأ إرسال</div>` : ''}</td>
     <td>${text('address', o.address, 'style="width:120px"')}</td>
-    <td>${state.user.role === 'admin' && edit
+    <td>${can('products') && edit
       ? `<select class="cell drop ${o.store_id ? '' : 'missing'}" data-store title="البوتيك تاع المنتج: يتبدل للمنتج كامل">
           <option value="">— بلا بوتيك</option>
           ${stores.map((s) => `<option value="${s.id}" ${s.id === o.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`
@@ -648,11 +658,11 @@ function orderRow(o, products, companies, stores) {
       ${o.tracking ? `<div class="muted" dir="ltr">${esc(o.tracking)}</div>` : ''}</td>
     <td class="muted">${esc(o.confirmed_by || '')}</td>
     <td class="acts nowrap">
-      ${state.user.role === 'admin' && !['dispatched', 'delivered', 'returned'].includes(o.status) ? `<button data-delete title="حذف">${icon('trash', 'red')}</button>` : ''}
+      ${isAdminUser() && !['dispatched', 'delivered', 'returned'].includes(o.status) ? `<button data-delete title="حذف">${icon('trash', 'red')}</button>` : ''}
       <button data-open title="السجل">${icon('clock')}</button>
       ${o.status === 'confirmed' ? `<button data-dispatch title="إرسال لشركة التوصيل" class="dark">${icon('send')}</button>` : ''}
       ${edit ? `<button data-edit title="تعديل كامل">${icon('edit', 'green')}</button>` : ''}
-      ${o.status === 'confirmed' || (o.status === 'dispatched' && state.user.role === 'admin')
+      ${(o.status === 'confirmed' && can('tracking')) || (o.status === 'dispatched' && isAdminUser())
         ? `<button data-back title="رجّعها لتأكيد الطلبيات${o.status === 'dispatched' ? ' (الطرد يتحذف عند شركة التوصيل)' : ''}">${icon('truck', 'red')}</button>` : ''}
       ${o.tracking ? `<button data-open title="التراكينغ: ${esc(o.tracking)}">${icon('truck', 'green')}</button>` : ''}
       ${o.status === 'returned' && !o.return_received_at ? '<button class="btn small" data-received title="الطرد الراجع وصل ليدك: السلعة ترجع للستوك">وصل الروتور</button>' : ''}
@@ -1113,7 +1123,7 @@ function accountingCard(a, p) {
 // ---------- products ----------
 async function productsPage() {
   const [products, stores, companies] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies')]);
-  const isAdmin = state.user.role === 'admin';
+  const isAdmin = can('products');
   const select = (field, list, selected, empty) => `<select class="cell" data-product-field="${field}" data-orig="${selected ?? ''}"><option value="">${empty}</option>
     ${list.map((x) => `<option value="${x.id}" ${x.id === selected ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
   const main = shell(`
@@ -1228,7 +1238,7 @@ function embedDialog(p) {
     <pre class="code">${esc(`${origin}/form.html?key=${p.public_key}`)}</pre>
     <details><summary class="muted">عندك فورم خاص بيك؟</summary><pre class="code">${esc(custom)}</pre></details>
     <div class="actions" style="margin-top:12px">
-      ${state.user.role === 'admin' ? '<button class="btn danger" data-regen>تغيير المفتاح</button>' : ''}
+      ${can('products') ? '<button class="btn danger" data-regen>تغيير المفتاح</button>' : ''}
       <button class="btn" data-close>إغلاق</button>
     </div>`);
   box.querySelector('[data-copy]').onclick = () => navigator.clipboard.writeText(snippet).then(() => toast('تم النسخ'));
@@ -1587,28 +1597,87 @@ async function adsPage() {
 }
 
 // ---------- users ----------
+// Ready-made sets of pages for the usual jobs; the boxes can still be changed one by one.
+const USER_PRESETS = [
+  ['تأكيد', ['confirm']],
+  ['سويفي', ['tracking']],
+  ['تأكيد + سويفي', ['confirm', 'tracking']],
+  ['محاسب', ['stats', 'accounting', 'ads', 'products']],
+];
+
+function permissionBoxes(perms, checked, disabled = false) {
+  return `<div class="perm-grid">${Object.entries(perms).map(([k, label]) => `<label class="check">
+    <input type="checkbox" name="perm" value="${k}" ${checked.includes(k) ? 'checked' : ''} ${disabled ? 'disabled' : ''}> ${esc(label)}</label>`).join('')}</div>`;
+}
+
+// The role menu and the page boxes, for adding or editing an account.
+function bindPermissionForm(form) {
+  const role = form.querySelector('[name=role]');
+  const boxes = () => form.querySelectorAll('[name=perm]');
+  const sync = () => boxes().forEach((b) => { b.disabled = role.value === 'admin'; if (role.value === 'admin') b.checked = true; });
+  role.onchange = sync;
+  form.querySelectorAll('[data-preset]').forEach((btn) => (btn.onclick = () => {
+    role.value = 'agent';
+    const keys = USER_PRESETS[Number(btn.dataset.preset)][1];
+    boxes().forEach((b) => { b.disabled = false; b.checked = keys.includes(b.value); });
+  }));
+  sync();
+  return () => ({ role: role.value, permissions: [...boxes()].filter((b) => b.checked).map((b) => b.value) });
+}
+
+function permissionFields(perms, user = { role: 'agent', permissions: [] }) {
+  return `<label>النوع<select name="role"><option value="agent" ${user.role !== 'admin' ? 'selected' : ''}>عامل (يشوف غير الصفحات المكوشية)</option>
+      <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>مدير (يشوف كلش ويزيد المستخدمين)</option></select></label>
+    <div class="bar">${USER_PRESETS.map(([l], i) => `<button class="btn small" type="button" data-preset="${i}">${esc(l)}</button>`).join('')}</div>
+    <div class="muted">واش يقدر يشوف ويخدم:</div>
+    ${permissionBoxes(perms, user.role === 'admin' ? Object.keys(perms) : user.permissions)}`;
+}
+
 async function usersPage() {
-  const users = await api('GET', '/users');
+  const { users, permissions } = await api('GET', '/users');
   const main = shell(`
     <h2>المستخدمين</h2>
-    <form class="bar card" id="user-form">
-      <label>اسم المستخدم<input name="username" required></label>
-      <label>كلمة السر<input name="password" type="password" required minlength="6"></label>
-      <label>الدور<select name="role"><option value="agent">مؤكدة (تأكيد الطلبيات)</option><option value="admin">مدير</option></select></label>
-      <button class="btn primary">إضافة</button>
+    <form class="card stack" id="user-form">
+      <h3 style="margin:0">زيد مستخدم</h3>
+      <div class="grid3">
+        <label>اسم المستخدم<input name="username" required></label>
+        <label>كلمة السر<input name="password" type="password" required minlength="6"></label>
+      </div>
+      ${permissionFields(permissions)}
+      <div class="actions"><button class="btn primary">إضافة</button></div>
     </form>
     <div class="table-wrap"><table>
-      <tr><th>الاسم</th><th>الدور</th><th>تاريخ الإنشاء</th><th></th></tr>
-      ${users.map((u) => `<tr><td>${esc(u.username)}</td><td>${u.role === 'admin' ? 'مدير' : 'مؤكدة'}</td><td class="muted">${esc(fmtDate(u.created_at))}</td>
-        <td class="actions"><button class="btn small" data-pass="${u.id}">كلمة السر</button>
+      <tr><th>الاسم</th><th>النوع</th><th>واش يشوف</th><th>تاريخ الإنشاء</th><th></th></tr>
+      ${users.map((u) => `<tr><td>${esc(u.username)}</td><td>${roleLabel(u)}</td>
+        <td class="muted">${u.role === 'admin' ? 'كلش' : u.permissions.map((k) => esc(permissions[k])).join('، ') || '—'}</td>
+        <td class="muted">${esc(fmtDate(u.created_at))}</td>
+        <td class="actions"><button class="btn small" data-perms="${u.id}">الصلاحيات</button>
+        <button class="btn small" data-pass="${u.id}">كلمة السر</button>
         ${u.id === state.user.id ? '' : `<button class="btn small danger" data-del="${u.id}">حذف</button>`}</td></tr>`).join('')}
     </table></div>`);
-  main.querySelector('#user-form').onsubmit = guard(async (e) => {
+  const form = main.querySelector('#user-form');
+  const read = bindPermissionForm(form);
+  form.onsubmit = guard(async (e) => {
     e.preventDefault();
-    await api('POST', '/users', formData(e.target));
-    toast('تم');
+    await api('POST', '/users', { username: form.elements.username.value, password: form.elements.password.value, ...read() });
+    toast('تزاد المستخدم');
     router();
   });
+  main.querySelectorAll('[data-perms]').forEach((b) => (b.onclick = () => {
+    const u = users.find((x) => x.id === Number(b.dataset.perms));
+    const box = modal.open(`<h3>صلاحيات ${esc(u.username)}</h3>
+      <form class="stack" id="perm-form">${permissionFields(permissions, u)}
+        <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إغلاق</button></div></form>`);
+    const f = box.querySelector('#perm-form');
+    const readEdit = bindPermissionForm(f);
+    f.onsubmit = guard(async (e) => {
+      e.preventDefault();
+      await api('PUT', `/users/${u.id}/permissions`, readEdit());
+      modal.close();
+      toast('تم الحفظ');
+      router();
+    });
+  }));
   main.querySelectorAll('[data-pass]').forEach((b) => (b.onclick = guard(async () => {
     const password = prompt('كلمة السر الجديدة (6 حروف على الأقل)');
     if (password) {

@@ -71,12 +71,41 @@ export function authMiddleware(db) {
       return next();
     }
     const session = unsign(getCookie(c, COOKIE));
-    const user = session && await db.get('SELECT id, username, role FROM users WHERE id = ?', session.uid);
-    if (!user) return c.json({ error: 'غير مسجل' }, 401);
-    c.set('user', user);
+    const row = session && await db.get('SELECT id, username, role, permissions FROM users WHERE id = ?', session.uid);
+    if (!row) return c.json({ error: 'غير مسجل' }, 401);
+    c.set('user', publicUser(row));
     return next();
   };
 }
+
+// What a non-admin account can be allowed to see and do.
+export const PERMISSIONS = {
+  dashboard: 'لوحة التحكم',
+  stats: 'الإحصائيات',
+  confirm: 'تأكيد الطلبيات',
+  tracking: 'تتبع الطلبيات (السويفي)',
+  products: 'المنتجات',
+  accounting: 'الفايدة لكل منتج',
+  stores: 'البوتيكات',
+  sheets: 'الشيتات',
+  delivery: 'التوصيل',
+  ads: 'مصاريف الإشهار',
+};
+
+export const parsePermissions = (v) => String(v || '').split(',').map((s) => s.trim()).filter((s) => s in PERMISSIONS);
+
+export function publicUser(row) {
+  const permissions = row.role === 'admin' ? Object.keys(PERMISSIONS) : parsePermissions(row.permissions);
+  return { id: row.id, username: row.username, role: row.role, permissions };
+}
+
+export const can = (user, perm) => user?.role === 'admin' || Boolean(user?.permissions?.includes(perm));
+
+// Lets the request through when the account has any of these permissions.
+export const requirePerm = (...perms) => async (c, next) => {
+  if (!perms.some((p) => can(c.get('user'), p))) return c.json({ error: 'ما عندكش الصلاحية' }, 403);
+  return next();
+};
 
 export async function requireAdmin(c, next) {
   if (c.get('user')?.role !== 'admin') return c.json({ error: 'للمدير فقط' }, 403);
