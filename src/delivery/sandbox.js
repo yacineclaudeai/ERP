@@ -6,6 +6,7 @@ export const sandbox = {
     counter += 1;
     return { tracking: `TEST-${order.reference}-${counter}` };
   },
+  async cancelShipment() {},
   async getStatus() {
     return { raw: 'sandbox', status: null };
   },

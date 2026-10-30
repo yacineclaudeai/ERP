@@ -8,6 +8,7 @@ import { openPgDb } from './db.js';
 import { openLocalDb } from './db-local.js';
 import { createApp } from './app.js';
 import { syncTracking } from './services/orders.js';
+import { syncAllSheets } from './services/sheets.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 try {
@@ -30,3 +31,4 @@ serve({ fetch: app.fetch, port }, () => console.log(`ERP running on http://local
 // Pull delivered/returned statuses from the delivery companies every 30 minutes
 // (on Netlify the scheduled function sync-tracking does this).
 setInterval(() => syncTracking(db).catch((e) => console.error('sync failed', e)), 30 * 60_000);
+setInterval(() => syncAllSheets(db).catch((e) => console.error('sheets sync failed', e)), 5 * 60_000);

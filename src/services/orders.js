@@ -2,7 +2,8 @@ import { getSetting } from '../db.js';
 import { isValidWilaya } from '../wilayas.js';
 import { getProvider } from '../delivery/index.js';
 
-export const STATUSES = ['new', 'no_answer', 'postponed', 'confirmed', 'cancelled', 'dispatched', 'delivered', 'returned'];
+// 'fake' comes from a fake-orders sheet: kept for the stats, never confirmed or shipped.
+export const STATUSES = ['new', 'no_answer', 'postponed', 'confirmed', 'cancelled', 'dispatched', 'delivered', 'returned', 'fake'];
 const OPEN = ['new', 'no_answer', 'postponed'];
 const EDITABLE = [...OPEN, 'confirmed'];
 
@@ -22,14 +23,15 @@ export function normalizePhone(raw) {
   return /^0\d{8,9}$/.test(p) ? p : null;
 }
 
-// Company choice, most specific first: the store's exception for this wilaya,
-// the store's own account, the global wilaya route, then the default company.
+// Company choice, most specific first: the company set on the product, the
+// store's exception for this wilaya, the store's own company, the global
+// wilaya route, then the default company.
 // Shipping fees always come from the global wilaya table.
-export async function resolveRoute(db, wilayaCode, storeId = null) {
+export async function resolveRoute(db, wilayaCode, storeId = null, productCompanyId = null) {
   const route = await db.get('SELECT * FROM delivery_routes WHERE wilaya_code = ?', wilayaCode);
   const fallback = await getSetting(db, 'default_company_id');
-  let companyId = null;
-  if (storeId) {
+  let companyId = productCompanyId ?? null;
+  if (storeId && !companyId) {
     companyId = (await db.get('SELECT company_id FROM store_routes WHERE store_id = ? AND wilaya_code = ?', storeId, wilayaCode))?.company_id
       ?? (await db.get('SELECT company_id FROM stores WHERE id = ?', storeId))?.company_id
       ?? null;
@@ -39,6 +41,15 @@ export async function resolveRoute(db, wilayaCode, storeId = null) {
     home_fee: route?.home_fee ?? 0,
     desk_fee: route?.desk_fee ?? 0,
   };
+}
+
+// A company as one store uses it: the store's own token and key at that
+// company win over the company-wide ones.
+export async function companyAccount(db, companyId, storeId = null) {
+  const company = await db.get('SELECT * FROM delivery_companies WHERE id = ?', companyId);
+  if (!company || !storeId) return company;
+  const account = await db.get('SELECT api_token, api_key FROM store_accounts WHERE store_id = ? AND company_id = ?', storeId, companyId);
+  return { ...company, api_token: account?.api_token || company.api_token, api_key: account?.api_key || null };
 }
 
 function logEvent(db, orderId, type, message, userId = null) {
@@ -52,16 +63,48 @@ async function moveStock(db, productId, orderId, quantity, reason) {
     productId, orderId, quantity, reason);
 }
 
+// Stock moves for every product of the order: its own product and the extra ones.
+async function moveOrderStock(db, order, sign, reason, orderId = order.id) {
+  await moveStock(db, order.product_id, orderId, sign * order.quantity, reason);
+  for (const item of order.items) await moveStock(db, item.product_id, orderId, sign * item.quantity, reason);
+}
+
+// Extra products of an order, checked: [{ product_id, quantity, unit_price }].
+async function readItems(db, list, trusted) {
+  if (!Array.isArray(list)) return [];
+  const items = [];
+  for (const raw of list) {
+    const product = await db.get('SELECT * FROM products WHERE id = ?', Number(raw?.product_id) || 0);
+    if (!product) throw new HttpError(404, 'المنتج غير موجود');
+    const quantity = Math.max(1, Math.floor(Number(raw.quantity ?? 1)) || 1);
+    const unit_price = trusted && raw.unit_price != null && raw.unit_price !== '' ? Number(raw.unit_price) : product.price;
+    if (!Number.isFinite(unit_price) || unit_price < 0) throw new HttpError(400, 'السعر غير صحيح');
+    items.push({ product_id: product.id, quantity, unit_price });
+  }
+  return items;
+}
+
+const itemsTotal = (items) => items.reduce((a, i) => a + i.unit_price * i.quantity, 0);
+
+async function saveItems(db, orderId, items) {
+  await db.run('DELETE FROM order_items WHERE order_id = ?', orderId);
+  for (const i of items) {
+    await db.run('INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)', orderId, i.product_id, i.quantity, i.unit_price);
+  }
+}
+
 // lock = true takes a row lock on the order, for read-then-write inside a transaction.
 export async function getOrder(db, id, { lock = false } = {}) {
   const order = await db.get(`
-    SELECT o.*, p.name AS product_name, p.store_id, s.name AS store_name, c.name AS company_name, c.provider AS company_provider
+    SELECT o.*, p.name AS product_name, p.store_id, p.company_id AS product_company_id, s.name AS store_name, c.name AS company_name, c.provider AS company_provider
     FROM orders o
     JOIN products p ON p.id = o.product_id
     LEFT JOIN stores s ON s.id = p.store_id
     LEFT JOIN delivery_companies c ON c.id = o.company_id
     WHERE o.id = ?${lock ? ' FOR UPDATE OF o' : ''}`, id);
   if (!order) throw new HttpError(404, 'Commande introuvable');
+  order.items = await db.all(`SELECT i.id, i.product_id, i.quantity, i.unit_price, p.name AS product_name
+    FROM order_items i JOIN products p ON p.id = i.product_id WHERE i.order_id = ? ORDER BY i.id`, id);
   return order;
 }
 
@@ -88,36 +131,42 @@ function validateOrderFields(input) {
   };
 }
 
-export async function createOrder(db, input, { source = 'manual', userId = null } = {}) {
+// sheet: { source_id, external_id, name } for an order imported from a Google Sheet.
+export async function createOrder(db, input, { source = 'manual', userId = null, sheet = null } = {}) {
   const product = input.product_id != null
     ? await db.get('SELECT * FROM products WHERE id = ?', Number(input.product_id) || 0)
     : await db.get('SELECT * FROM products WHERE public_key = ?', String(input.key ?? ''));
   if (!product || (source === 'landing' && !product.active)) throw new HttpError(404, 'المنتج غير موجود');
 
   const f = validateOrderFields(input);
-  const route = await resolveRoute(db, f.wilaya_code, product.store_id);
-  const unit_price = input.unit_price != null && source !== 'landing' ? Number(input.unit_price) : product.price;
-  const delivery_fee = f.stop_desk ? route.desk_fee : route.home_fee;
-  const total = unit_price * f.quantity + delivery_fee;
+  const route = await resolveRoute(db, f.wilaya_code, product.store_id, product.company_id);
+  const trusted = source !== 'landing';
+  const unit_price = input.unit_price != null && trusted ? Number(input.unit_price) : product.price;
+  const delivery_fee = input.delivery_fee != null && trusted ? Number(input.delivery_fee) : f.stop_desk ? route.desk_fee : route.home_fee;
+  const items = await readItems(db, input.items, trusted);
+  const total = input.total != null && trusted ? Number(input.total) : unit_price * f.quantity + itemsTotal(items) + delivery_fee;
+  const status = sheet && input.status === 'fake' ? 'fake' : 'new';
 
   return db.tx(async (t) => {
     const dup = await t.get(`
       SELECT id FROM orders
-      WHERE phone = ? AND product_id = ? AND created_at >= now() - interval '3 days'
+      WHERE phone = ? AND product_id = ? AND status <> 'fake' AND created_at >= now() - interval '3 days'
       ORDER BY id LIMIT 1`, f.phone, product.id);
 
     const { rows: [{ id }] } = await t.run(`
       INSERT INTO orders (product_id, quantity, unit_price, delivery_fee, total, customer_name, phone, phone2,
         wilaya_code, commune, address, stop_desk, notes, source, landing_url, utm_source, utm_campaign,
-        duplicate_of, company_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        duplicate_of, company_id, status, sheet_source_id, external_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       product.id, f.quantity, unit_price, delivery_fee, total, f.customer_name, f.phone, f.phone2,
       f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes, source,
       input.landing_url ?? null, input.utm_source ?? null, input.utm_campaign ?? null,
-      dup?.id ?? null, route.company_id,
+      dup?.id ?? null, route.company_id, status, sheet?.source_id ?? null, sheet?.external_id ?? null,
     );
     await t.run('UPDATE orders SET reference = ? WHERE id = ?', `CMD-${String(id).padStart(6, '0')}`, id);
-    await logEvent(t, id, 'created', source === 'landing' ? 'من صفحة الهبوط' : 'يدوياً', userId);
+    await saveItems(t, id, items);
+    const origin = sheet ? `من الشيت ${sheet.name}` : source === 'landing' ? 'من صفحة الهبوط' : 'يدوياً';
+    await logEvent(t, id, 'created', origin, userId);
     if (dup) await logEvent(t, id, 'duplicate', `طلبية مكررة محتملة (#${dup.id})`);
     return getOrder(t, id);
   });
@@ -128,8 +177,17 @@ export async function updateOrder(db, id, input, userId = null) {
     const order = await getOrder(t, id, { lock: true });
     if (!EDITABLE.includes(order.status)) throw new HttpError(409, 'لا يمكن تعديل طلبية بعد إرسالها');
     const f = validateOrderFields({ ...order, ...input });
-    const route = await resolveRoute(t, f.wilaya_code, order.store_id);
-    const unit_price = input.unit_price != null ? Number(input.unit_price) : order.unit_price;
+    // The product can change only while no stock is held for the order.
+    let product = null;
+    if (input.product_id != null && Number(input.product_id) !== order.product_id) {
+      if (order.stock_reserved) throw new HttpError(409, 'لا يمكن تبديل المنتج بعد التأكيد، ألغي الطلبية وعاود');
+      product = await t.get('SELECT * FROM products WHERE id = ?', Number(input.product_id) || 0);
+      if (!product) throw new HttpError(404, 'المنتج غير موجود');
+    }
+    const storeId = product ? product.store_id : order.store_id;
+    const productCompanyId = product ? product.company_id : order.product_company_id;
+    const route = await resolveRoute(t, f.wilaya_code, storeId, productCompanyId);
+    const unit_price = input.unit_price != null ? Number(input.unit_price) : product ? product.price : order.unit_price;
     const delivery_fee = input.delivery_fee != null
       ? Number(input.delivery_fee)
       : (f.wilaya_code !== order.wilaya_code || f.stop_desk !== order.stop_desk)
@@ -137,39 +195,75 @@ export async function updateOrder(db, id, input, userId = null) {
         : order.delivery_fee;
     const company_id = input.company_id !== undefined
       ? (input.company_id ? Number(input.company_id) : null)
-      : f.wilaya_code !== order.wilaya_code ? route.company_id : order.company_id;
+      : f.wilaya_code !== order.wilaya_code || product ? route.company_id : order.company_id;
 
     if (order.stock_reserved && f.quantity !== order.quantity) {
       await moveStock(t, order.product_id, id, order.quantity - f.quantity, 'تعديل الكمية');
     }
+    // The extra products can change only while no stock is held, like the main one.
+    let items = order.items;
+    if (input.items !== undefined) {
+      if (order.stock_reserved) throw new HttpError(409, 'لا يمكن تبديل المنتجات بعد التأكيد، ألغي الطلبية وعاود');
+      items = await readItems(t, input.items, true);
+      await saveItems(t, id, items);
+    }
     await t.run(`
-      UPDATE orders SET customer_name = ?, phone = ?, phone2 = ?, wilaya_code = ?, commune = ?, address = ?,
+      UPDATE orders SET product_id = ?, customer_name = ?, phone = ?, phone2 = ?, wilaya_code = ?, commune = ?, address = ?,
         stop_desk = ?, notes = ?, quantity = ?, unit_price = ?, delivery_fee = ?, total = ?, company_id = ?,
         updated_at = now()
       WHERE id = ?`,
-      f.customer_name, f.phone, f.phone2, f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes,
-      f.quantity, unit_price, delivery_fee, unit_price * f.quantity + delivery_fee, company_id, id,
+      product ? product.id : order.product_id, f.customer_name, f.phone, f.phone2, f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes,
+      f.quantity, unit_price, delivery_fee, unit_price * f.quantity + itemsTotal(items) + delivery_fee, company_id, id,
     );
-    await logEvent(t, id, 'edited', null, userId);
+    await logEvent(t, id, 'edited', product ? `المنتج: ${product.name}` : null, userId);
     return getOrder(t, id);
   });
 }
 
 // Confirmation-team actions. Returns the updated order; confirming also
 // triggers the automatic dispatch (see confirmAndDispatch).
-export async function applyAction(db, id, action, { userId = null, note = null } = {}) {
+export async function applyAction(db, id, action, { userId = null, note = null, attempts = null } = {}) {
   return db.tx(async (t) => {
     const order = await getOrder(t, id, { lock: true });
     const set = (status, extra = '') =>
       t.run(`UPDATE orders SET status = ?, updated_at = now()${extra} WHERE id = ?`, status, id);
 
     switch (action) {
-      case 'no_answer':
+      // Fix the failed number by hand (a "+1" pressed by mistake): الفاشلة 3 back to 1.
+      case 'set_failed': {
+        const n = Number(attempts);
+        if (order.status !== 'no_answer') throw new HttpError(409, 'الحالة لا تسمح');
+        if (!Number.isInteger(n) || n < 1 || n > 5) throw new HttpError(400, 'رقم الفاشلة من 1 حتى 5');
+        await t.run('UPDATE orders SET call_attempts = ?, updated_at = now() WHERE id = ?', n, id);
+        await logEvent(t, id, 'edited', `الفاشلة ${order.call_attempts} ← الفاشلة ${n}`, userId);
+        break;
+      }
+      // -1: the previous failed number; from الفاشلة 1 back to new.
+      case 'unfail':
+        if (order.status !== 'no_answer') throw new HttpError(409, 'الحالة لا تسمح');
+        if (order.call_attempts > 1) {
+          const n = Math.min(5, order.call_attempts - 1);
+          await t.run('UPDATE orders SET call_attempts = ?, updated_at = now() WHERE id = ?', n, id);
+          await logEvent(t, id, 'edited', `الفاشلة ${order.call_attempts} ← الفاشلة ${n}`, userId);
+        } else {
+          await set('new', ', call_attempts = 0');
+          await logEvent(t, id, 'reopened', note || 'رجعت جديدة', userId);
+        }
+        break;
+      case 'no_answer': {
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await t.run(`UPDATE orders SET status = 'no_answer', call_attempts = call_attempts + 1,
           updated_at = now() WHERE id = ?`, id);
         await logEvent(t, id, 'no_answer', note || `محاولة ${order.call_attempts + 1}`, userId);
+        // Every `limit` failed calls the order goes down the product's chain of
+        // agents chosen by the admin: second agent, then third agent.
+        const limit = Number(await getSetting(t, 'auto_transfer_after')) || 0;
+        if (limit && order.assigned_to && (order.call_attempts + 1) % limit === 0) {
+          const next = await nextProductAgent(t, order.product_id, order.assigned_to);
+          if (next) await transferOrder(t, order, next, `الفاشلة ${order.call_attempts + 1}`);
+        }
         break;
+      }
       case 'postpone':
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await set('postponed');
@@ -177,18 +271,24 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         break;
       case 'confirm':
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الطلبية مؤكدة أو مغلقة من قبل');
-        await moveStock(t, order.product_id, id, -order.quantity, 'تأكيد طلبية');
+        await moveOrderStock(t, order, -1, 'تأكيد طلبية');
         await set('confirmed', ', stock_reserved = true, confirmed_at = now(), dispatch_error = NULL');
         await logEvent(t, id, 'confirmed', note, userId);
         break;
       case 'cancel':
         if (![...OPEN, 'confirmed'].includes(order.status)) throw new HttpError(409, 'لا يمكن إلغاء طلبية مرسلة');
-        if (order.stock_reserved) await moveStock(t, order.product_id, id, order.quantity, 'إلغاء طلبية');
+        if (order.stock_reserved) await moveOrderStock(t, order, 1, 'إلغاء طلبية');
         await set('cancelled', ', stock_reserved = false, closed_at = now()');
         await logEvent(t, id, 'cancelled', note, userId);
         break;
+      case 'reset':
+        // Undo no_answer/postpone: back to new, attempts start again.
+        if (!['no_answer', 'postponed'].includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
+        await set('new', ', call_attempts = 0');
+        await logEvent(t, id, 'reopened', note || 'رجعت جديدة', userId);
+        break;
       case 'reopen':
-        if (order.status !== 'cancelled') throw new HttpError(409, 'الحالة لا تسمح');
+        if (!['cancelled', 'fake'].includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await set('new', ', closed_at = NULL');
         await logEvent(t, id, 'reopened', note, userId);
         break;
@@ -198,10 +298,16 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         await logEvent(t, id, 'delivered', note, userId);
         break;
       case 'returned':
+        // The parcel is on its way back: its stock returns only once received.
         if (order.status !== 'dispatched') throw new HttpError(409, 'الطلبية لم ترسل بعد');
-        if (order.stock_reserved) await moveStock(t, order.product_id, id, order.quantity, 'روتور');
-        await set('returned', ', stock_reserved = false, closed_at = now()');
+        await set('returned', ', closed_at = now()');
         await logEvent(t, id, 'returned', note, userId);
+        break;
+      case 'return_received':
+        if (order.status !== 'returned' || order.return_received_at) throw new HttpError(409, 'الروتور وصل من قبل');
+        if (order.stock_reserved) await moveOrderStock(t, order, 1, 'روتور وصل');
+        await t.run('UPDATE orders SET stock_reserved = false, return_received_at = now(), updated_at = now() WHERE id = ?', id);
+        await logEvent(t, id, 'return_received', note, userId);
         break;
       default:
         throw new HttpError(400, `Action inconnue: ${action}`);
@@ -210,12 +316,54 @@ export async function applyAction(db, id, action, { userId = null, note = null }
   });
 }
 
+// The product's agent after this one: the second, then the third; null at
+// the end of the chain or when the admin chose none.
+async function nextProductAgent(db, productId, currentId) {
+  const p = await db.get('SELECT backup_agent_id, third_agent_id FROM products WHERE id = ?', productId);
+  const chain = [...new Set([p?.backup_agent_id, p?.third_agent_id].filter(Boolean))];
+  const nextId = chain[chain.indexOf(currentId) + 1];
+  return nextId ? db.get('SELECT id, username FROM users WHERE id = ?', nextId) : null;
+}
+
+// Gives the order to another agent.
+// asNew starts it again as a new order; otherwise it keeps its failed count
+// (الفاشلة N) so the next agent sees it.
+async function transferOrder(db, order, to, reason, { asNew = false } = {}) {
+  const from = order.assigned_to && await db.get('SELECT username FROM users WHERE id = ?', order.assigned_to);
+  if (asNew) await db.run(`UPDATE orders SET assigned_to = ?, status = 'new', call_attempts = 0, updated_at = now() WHERE id = ?`, to.id, order.id);
+  else await db.run('UPDATE orders SET assigned_to = ?, updated_at = now() WHERE id = ?', to.id, order.id);
+  await logEvent(db, order.id, 'transferred', `${reason}${from ? ` عند ${from.username}` : ''}، تحولت لـ ${to.username}`);
+}
+
+// The admin gives orders to an agent. asNew: also start them again as new
+// orders (for failed ones moving to another agent); only orders still at the
+// confirmation stage can start again.
+export async function assignOrders(db, ids, userId, { asNew = false, byUserId = null } = {}) {
+  const to = userId ? await db.get('SELECT id, username FROM users WHERE id = ?', userId) : null;
+  if (userId && !to) throw new HttpError(404, 'المستخدم غير موجود');
+  let done = 0;
+  await db.tx(async (t) => {
+    for (const id of ids) {
+      const order = await t.get('SELECT id, status, assigned_to FROM orders WHERE id = ? FOR UPDATE', id);
+      if (!order) continue;
+      if (asNew && to && OPEN.includes(order.status)) {
+        await transferOrder(t, order, to, 'حولها المدير', { asNew: true });
+      } else {
+        await t.run('UPDATE orders SET assigned_to = ?, updated_at = now() WHERE id = ?', to?.id ?? null, id);
+        await logEvent(t, id, 'assigned', to ? `تعطات لـ ${to.username}` : 'نحات من المؤكدة', byUserId);
+      }
+      done += 1;
+    }
+  });
+  return { assigned: done };
+}
+
 // Sends a confirmed order to its store's delivery company.
 export async function dispatchOrder(db, id, { userId = null, tracking = null } = {}) {
   const order = await getOrder(db, id);
   if (order.status !== 'confirmed') throw new HttpError(409, 'لازم الطلبية تكون مؤكدة');
-  const companyId = order.company_id ?? (await resolveRoute(db, order.wilaya_code, order.store_id)).company_id;
-  const company = companyId && await db.get('SELECT * FROM delivery_companies WHERE id = ?', companyId);
+  const companyId = order.company_id ?? (await resolveRoute(db, order.wilaya_code, order.store_id, order.product_company_id)).company_id;
+  const company = companyId && await companyAccount(db, companyId, order.store_id);
   const fail = async (msg) => {
     await db.run(`UPDATE orders SET dispatch_error = ?, updated_at = now() WHERE id = ?`, msg, id);
     await logEvent(db, id, 'dispatch_failed', msg, userId);
@@ -223,6 +371,9 @@ export async function dispatchOrder(db, id, { userId = null, tracking = null } =
   };
   if (!company) return fail('ما كاين حتى شركة توصيل مربوطة بهاد البوتيك');
   if (!company.active) return fail(`شركة التوصيل ${company.name} موقفة`);
+  if (!tracking && company.provider === 'ecotrack' && !company.api_token) {
+    return fail(`ما كاينش التوكن تاع ${order.store_name || 'البوتيك'} عند ${company.name}: حطو في صفحة البوتيكات`);
+  }
 
   const product = await db.get('SELECT * FROM products WHERE id = ?', order.product_id);
   let result;
@@ -239,6 +390,38 @@ export async function dispatchOrder(db, id, { userId = null, tracking = null } =
   return getOrder(db, id);
 }
 
+// Back to the confirmation page as a new order, to fix a wrong confirmation or
+// a parcel sent to the wrong company. A sent parcel is first removed at the
+// company; if the company refuses (already picked up), nothing changes here.
+export async function backToConfirmation(db, id, { userId = null } = {}) {
+  const order = await getOrder(db, id);
+  if (!['confirmed', 'dispatched'].includes(order.status)) throw new HttpError(409, 'غير المؤكدة ولا اللي عند التوصيل ترجع للتأكيد');
+  let note = 'رجعت للتأكيد';
+  if (order.status === 'dispatched' && order.tracking) {
+    const company = order.company_id && await companyAccount(db, order.company_id, order.store_id);
+    const provider = company && getProvider(company.provider);
+    if (provider?.cancelShipment) {
+      try {
+        await provider.cancelShipment(company, order.tracking);
+      } catch (err) {
+        throw new HttpError(409, `${company.name} ما قبلتش تحذف الطرد ${order.tracking}: ${err.message}`);
+      }
+      note = `رجعت للتأكيد، والطرد ${order.tracking} تحذف عند ${company.name}`;
+    } else {
+      note = `رجعت للتأكيد. الطرد ${order.tracking} لازم يتحذف باليد عند ${company?.name || 'شركة التوصيل'}`;
+    }
+  }
+  return db.tx(async (t) => {
+    const current = await getOrder(t, id, { lock: true });
+    if (current.status !== order.status) throw new HttpError(409, 'الطلبية تبدلت، عاود حاول');
+    if (current.stock_reserved) await moveOrderStock(t, current, 1, 'رجوع للتأكيد');
+    await t.run(`UPDATE orders SET status = 'new', stock_reserved = false, tracking = NULL, dispatch_error = NULL, delivery_status = NULL,
+      confirmed_at = NULL, dispatched_at = NULL, call_attempts = 0, updated_at = now() WHERE id = ?`, id);
+    await logEvent(t, id, 'reopened', note, userId);
+    return getOrder(t, id);
+  });
+}
+
 export async function confirmAndDispatch(db, id, opts = {}) {
   const order = await applyAction(db, id, 'confirm', opts);
   if (await getSetting(db, 'auto_dispatch') === '0') return order;
@@ -248,13 +431,16 @@ export async function confirmAndDispatch(db, id, opts = {}) {
 // Pulls the latest status of dispatched orders from the delivery APIs.
 export async function syncTracking(db) {
   const rows = await db.all(`
-    SELECT c.*, o.id AS order_id, o.tracking FROM orders o JOIN delivery_companies c ON c.id = o.company_id
+    SELECT o.id AS order_id, o.tracking, o.company_id, p.store_id
+    FROM orders o JOIN products p ON p.id = o.product_id JOIN delivery_companies c ON c.id = o.company_id
     WHERE o.status = 'dispatched' AND o.tracking IS NOT NULL AND c.provider != 'manual'`);
   const summary = { checked: 0, delivered: 0, returned: 0, errors: 0 };
   for (const row of rows) {
     summary.checked += 1;
     try {
-      const { status } = await getProvider(row.provider).getStatus(row, row.tracking);
+      const company = await companyAccount(db, row.company_id, row.store_id);
+      const { raw, status } = await getProvider(company.provider).getStatus(company, row.tracking);
+      if (raw) await db.run('UPDATE orders SET delivery_status = ? WHERE id = ?', String(raw).slice(0, 100), row.order_id);
       if (status === 'delivered' || status === 'returned') {
         await applyAction(db, row.order_id, status, { note: 'تحديث أوتوماتيكي من شركة التوصيل' });
         summary[status] += 1;
@@ -264,4 +450,32 @@ export async function syncTracking(db) {
     }
   }
   return summary;
+}
+
+// A product moved to another store (branch): its orders not yet sent follow it
+// to that store's delivery company.
+export async function rerouteProductOrders(db, productId) {
+  const product = await db.get('SELECT store_id, company_id FROM products WHERE id = ?', productId);
+  if (!product) return 0;
+  const orders = await db.all(`SELECT id, wilaya_code FROM orders WHERE product_id = ? AND status IN (${EDITABLE.map(() => '?').join(', ')})`,
+    productId, ...EDITABLE);
+  for (const o of orders) {
+    const route = await resolveRoute(db, o.wilaya_code, product.store_id, product.company_id);
+    await db.run('UPDATE orders SET company_id = ?, updated_at = now() WHERE id = ?', route.company_id, o.id);
+  }
+  return orders.length;
+}
+
+// Removes an order that never reached a delivery company; held stock goes back.
+export async function deleteOrder(db, id) {
+  return db.tx(async (t) => {
+    const order = await getOrder(t, id, { lock: true });
+    if (['dispatched', 'delivered', 'returned'].includes(order.status)) throw new HttpError(409, 'ما تنجمش تحذف طلبية تبعثت');
+    if (order.stock_reserved) await moveOrderStock(t, order, 1, `حذف الطلبية ${order.reference}`, null);
+    await t.run('DELETE FROM order_events WHERE order_id = ?', id);
+    await t.run('UPDATE stock_movements SET order_id = NULL WHERE order_id = ?', id);
+    await t.run('UPDATE orders SET duplicate_of = NULL WHERE duplicate_of = ?', id);
+    await t.run('DELETE FROM orders WHERE id = ?', id);
+    return { ok: true };
+  });
 }

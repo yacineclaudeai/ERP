@@ -14,7 +14,7 @@ export function mapEcotrackStatus(raw) {
   return 'dispatched';
 }
 
-async function call(company, method, endpoint, params) {
+async function call(company, method, endpoint, params, timeout = 20_000) {
   if (!company.base_url || !company.api_token) {
     throw new Error('Ecotrack: base_url et api_token sont obligatoires');
   }
@@ -26,9 +26,9 @@ async function call(company, method, endpoint, params) {
   const init = {
     method,
     headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeout),
   };
-  if (method === 'GET') {
+  if (method === 'GET' || method === 'DELETE') {
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   } else {
     init.headers['Content-Type'] = 'application/json';
@@ -56,7 +56,8 @@ export const ecotrack = {
       commune: order.commune || '',
       code_wilaya: order.wilaya_code,
       montant: order.total,
-      produit: `${product.name} x${order.quantity}`,
+      // One parcel, every product of the order.
+      produit: [`${product.name} x${order.quantity}`, ...(order.items || []).map((i) => `${i.product_name} x${i.quantity}`)].join(' + '),
       remarque: order.notes || '',
       type: 1, // 1 = livraison
       stop_desk: order.stop_desk ? 1 : 0,
@@ -64,6 +65,23 @@ export const ecotrack = {
     const tracking = data.tracking || data.data?.tracking;
     if (!tracking) throw new Error(`Ecotrack: pas de tracking dans la réponse (${JSON.stringify(data).slice(0, 200)})`);
     return { tracking };
+  },
+
+  // One page (40 parcels) of the account's parcels created between start and end.
+  // Without dates Ecotrack only returns the last few months.
+  async listParcels(company, start, end, page = 1) {
+    const day = (d) => d.toISOString().slice(0, 10);
+    const data = await call(company, 'GET', 'get/orders', { start_date: day(start), end_date: day(end), page }, 50_000);
+    const rows = Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
+    return {
+      parcels: rows.map((r) => ({ tracking: r.tracking, products: r.products ?? r.produit ?? '' })),
+      last_page: Number(data.last_page || data.meta?.last_page || 1),
+    };
+  },
+
+  // Removes a parcel the company has not picked up yet; Ecotrack refuses later ones.
+  async cancelShipment(company, tracking) {
+    await call(company, 'DELETE', 'delete/order', { tracking });
   },
 
   async getStatus(company, tracking) {
