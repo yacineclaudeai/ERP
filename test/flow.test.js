@@ -711,7 +711,7 @@ test('an accountant sees the profit of the stores ticked for them only', async (
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
 });
 
-test('orders are given to agents; failed twice, they go to the next agent as new', async () => {
+test('orders are given to agents; failed twice, they go to the next agent (still الفاشلة 2)', async () => {
   const p = (await api('POST', '/api/products', { name: 'Assign item', price: 1000, stock: 5 })).body;
   await api('POST', '/api/users', { username: 'sara', password: 'secret1', role: 'agent', permissions: ['confirm'] });
   await api('POST', '/api/users', { username: 'amina', password: 'secret1', role: 'agent', permissions: ['confirm'] });
@@ -740,10 +740,15 @@ test('orders are given to agents; failed twice, they go to the next agent as new
 
   await as('amina');
   r = (await api('GET', `/api/orders/${o1.id}`)).body;
-  assert.equal(r.status, 'new');
-  assert.equal(r.call_attempts, 0);
+  assert.equal(r.status, 'no_answer', 'it stays failed (الفاشلة 2) for the next agent');
+  assert.equal(r.call_attempts, 2);
   assert.equal(r.assigned_to, amina.id);
   assert.ok(r.events.some((e) => e.type === 'transferred'));
+  assert.equal((await api('GET', '/api/orders/counts')).body.by_status.failed_2, 1);
+  assert.deepEqual((await api('GET', '/api/orders?status=failed_2')).body.rows.map((x) => x.id), [o1.id]);
+  assert.equal((await api('GET', '/api/orders?status=failed_1')).body.total, 0);
+  await api('POST', `/api/orders/${o1.id}/action`, { action: 'no_answer' });
+  assert.equal((await api('GET', '/api/orders?status=failed_3')).body.total, 1, 'الفاشلة 3 stays with amina');
 
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
   const team = (await api('GET', '/api/stats/confirmation')).body.team;

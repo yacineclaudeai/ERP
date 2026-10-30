@@ -236,9 +236,10 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         await logEvent(t, id, 'no_answer', note || `محاولة ${order.call_attempts + 1}`, userId);
         // Failed too many times with this agent: the next agent gets it as a new order.
         const limit = Number(await getSetting(t, 'auto_transfer_after')) || 0;
-        if (limit && order.assigned_to && order.call_attempts + 1 >= limit) {
+        // Every `limit` failed calls the order moves to the next agent.
+      if (limit && order.assigned_to && (order.call_attempts + 1) % limit === 0) {
           const next = await nextAgent(t, order.assigned_to);
-          if (next) await transferOrder(t, order, next, `فاشلة ${order.call_attempts + 1} مرات`);
+          if (next) await transferOrder(t, order, next, `الفاشلة ${order.call_attempts + 1}`);
         }
         break;
       }
@@ -307,9 +308,12 @@ async function nextAgent(db, currentId) {
 }
 
 // Gives the order to another agent as a new order: attempts start again.
-async function transferOrder(db, order, to, reason) {
+// asNew starts it again as a new order; otherwise it keeps its failed count
+// (الفاشلة N) so the next agent sees it.
+async function transferOrder(db, order, to, reason, { asNew = false } = {}) {
   const from = order.assigned_to && await db.get('SELECT username FROM users WHERE id = ?', order.assigned_to);
-  await db.run(`UPDATE orders SET assigned_to = ?, status = 'new', call_attempts = 0, updated_at = now() WHERE id = ?`, to.id, order.id);
+  if (asNew) await db.run(`UPDATE orders SET assigned_to = ?, status = 'new', call_attempts = 0, updated_at = now() WHERE id = ?`, to.id, order.id);
+  else await db.run('UPDATE orders SET assigned_to = ?, updated_at = now() WHERE id = ?', to.id, order.id);
   await logEvent(db, order.id, 'transferred', `${reason}${from ? ` عند ${from.username}` : ''}، تحولت لـ ${to.username}`);
 }
 
@@ -325,7 +329,7 @@ export async function assignOrders(db, ids, userId, { asNew = false, byUserId = 
       const order = await t.get('SELECT id, status, assigned_to FROM orders WHERE id = ? FOR UPDATE', id);
       if (!order) continue;
       if (asNew && to && OPEN.includes(order.status)) {
-        await transferOrder(t, order, to, 'حولها المدير');
+        await transferOrder(t, order, to, 'حولها المدير', { asNew: true });
       } else {
         await t.run('UPDATE orders SET assigned_to = ?, updated_at = now() WHERE id = ?', to?.id ?? null, id);
         await logEvent(t, id, 'assigned', to ? `تعطات لـ ${to.username}` : 'نحات من المؤكدة', byUserId);

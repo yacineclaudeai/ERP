@@ -1,11 +1,14 @@
 // Admin interface: a small hash-routed single page app, no build step.
 
 const STATUS_LABELS = {
-  new: 'جديدة', no_answer: 'ما ردش', postponed: 'مؤجلة', confirmed: 'مؤكدة', cancelled: 'ملغاة',
+  new: 'جديدة', no_answer: 'فاشلة', postponed: 'مؤجلة', confirmed: 'مؤكدة', cancelled: 'ملغاة',
   dispatched: 'عند التوصيل', delivered: 'مستلمة', returned: 'روتور', fake: 'وهمية',
 };
+// "ما ردش" orders are shown like Ecotrack: الفاشلة 1 … الفاشلة 5 (the failed calls).
+const FAILED = [1, 2, 3, 4, 5].map((n) => [`failed_${n}`, `الفاشلة ${n}`]);
+const failedLabel = (o) => `الفاشلة ${Math.max(1, o.call_attempts || 0)}`;
 const EVENT_LABELS = {
-  created: 'تسجلت', duplicate: 'مكررة؟', no_answer: 'ما ردش', postponed: 'تأجلت', confirmed: 'تأكدت',
+  created: 'تسجلت', duplicate: 'مكررة؟', no_answer: 'فاشلة (ما ردش)', postponed: 'تأجلت', confirmed: 'تأكدت',
   cancelled: 'تلغات', reopened: 'تعاودت تفتحت', dispatched: 'تبعثت للتوصيل', dispatch_failed: 'فشل الإرسال',
   delivered: 'تستلمت', returned: 'روتور', return_received: 'الروتور وصل', edited: 'تعدلت',
   assigned: 'تعطات لمؤكدة', transferred: 'تحولت لمؤكدة أخرى',
@@ -448,7 +451,8 @@ async function ordersPage(mode = 'confirm') {
     assigning ? api('GET', '/orders/agents') : null,
   ]);
   const tabs = mode === 'confirm'
-    ? [[P.first, 'للتأكيد', P.first.split(',')], ...P.statuses.map((k) => [k, STATUS_LABELS[k], [k]]), [P.statuses.join(','), 'الكل', P.statuses]]
+    ? [[P.first, 'للتأكيد', P.first.split(',')], ['new', STATUS_LABELS.new, ['new']], ...FAILED.map(([k, l]) => [k, l, [k]]),
+      ...P.statuses.filter((k) => !['new', 'no_answer'].includes(k)).map((k) => [k, STATUS_LABELS[k], [k]]), [P.statuses.join(','), 'الكل', P.statuses]]
     : [[P.first, 'الكل', P.statuses], ...P.statuses.map((k) => [k, STATUS_LABELS[k], [k]])];
   const go = (patch) => {
     const p = new URLSearchParams(Object.entries({ ...f, page: '', ...patch }).filter(([, v]) => v !== ''));
@@ -475,7 +479,7 @@ async function ordersPage(mode = 'confirm') {
     </form>
     <div class="bulk hidden" id="bulk"><b id="bulk-n"></b>
       <select id="bulk-action"><option value="">تبديل الحالة للمحددين…</option>
-        <option value="confirm">مؤكدة</option><option value="no_answer">ما ردش</option>
+        <option value="confirm">مؤكدة</option><option value="no_answer">فاشلة (ما ردش +1)</option>
         <option value="postpone">مؤجلة</option><option value="cancel">ملغاة</option></select>
       <button class="btn small" id="bulk-go">تطبيق</button>
       ${assigning ? `<span class="bulk-sep"></span>
@@ -485,7 +489,7 @@ async function ordersPage(mode = 'confirm') {
       <button class="btn small primary" id="assign-go">عطيهم</button>` : ''}</div>
     ${assigning ? `<div class="bar muted">
       <label class="check">الفاشلة تتحول وحدها للمؤكدة الأخرى بعد
-        <input id="auto-transfer" type="number" min="0" max="20" value="${team.auto_transfer_after}" style="width:60px"> مرات "ما ردش" (0 = لا)</label>
+        <input id="auto-transfer" type="number" min="0" max="20" value="${team.auto_transfer_after}" style="width:60px"> فاشلات (مثلا 2: بعد الفاشلة 2 والفاشلة 4) — 0 = لا</label>
       ${team.agents.length ? '' : '<span class="neg">مازال ما زدت حتى مؤكدة (صفحة المستخدمين)</span>'}</div>` : ''}
     <div class="top-scroll" id="top-scroll"><div></div></div>
     <div class="table-wrap orders-wrap" id="orders-wrap"><table class="orders">
@@ -493,7 +497,7 @@ async function ordersPage(mode = 'confirm') {
         <th><input type="checkbox" id="check-all"></th>
         ${hfilter('المصدر', 'source', Object.entries(SOURCE_LABELS))}
         <th>رقم الطلبية</th><th>التاريخ</th><th>الاسم الكامل</th><th>الهاتف</th><th>اتصال</th>
-        ${hfilter('الحالة', 'status', P.statuses.map((k) => [k, STATUS_LABELS[k]]))}
+        ${hfilter('الحالة', 'status', P.statuses.flatMap((k) => (k === 'no_answer' ? FAILED : [[k, STATUS_LABELS[k]]])))}
         <th>العنوان</th>
         ${hfilter('البوتيك', 'store_id', stores.map((s) => [s.id, s.name]))}
         ${hfilter('نوع التوصيل', 'stop_desk', [['0', 'المنزل'], ['1', 'مكتب']])}
@@ -636,8 +640,10 @@ function statusCell(o) {
   if (o.status === 'returned') return `<span class="pill returned">${o.return_received_at ? 'روتور (وصل)' : 'روتور (في الطريق)'}</span>`;
   if (!moves) return `<span class="pill ${o.status}">${STATUS_LABELS[o.status] || o.status}</span>`;
   const opts = [o.status, ...moves.filter((s) => s !== o.status)];
+  const label = (s) => (s !== 'no_answer' ? STATUS_LABELS[s]
+    : s === o.status ? failedLabel(o) : `الفاشلة ${(o.call_attempts || 0) + 1}`);
   return `<select class="pill ${o.status}" data-move>${opts.map((s) =>
-    `<option value="${s}" ${s === o.status ? 'selected' : ''}>${STATUS_LABELS[s]}</option>`).join('')}</select>`;
+    `<option value="${s}" ${s === o.status ? 'selected' : ''}>${label(s)}</option>`).join('')}</select>`;
 }
 
 function orderRow(o, products, companies, stores) {
@@ -663,7 +669,7 @@ function orderRow(o, products, companies, stores) {
     <td class="nowrap"><a class="wa" href="${whatsapp(o.phone)}" target="_blank" rel="noopener" title="WhatsApp">●</a>
       ${text('phone', o.phone, 'style="width:100px" dir="ltr"')}</td>
     <td class="nowrap"><span class="calls ${o.call_attempts ? 'has' : ''}" title="محاولات الاتصال">${o.call_attempts || 0} ✆</span>
-      ${['new', 'no_answer', 'postponed'].includes(o.status) ? '<button class="plus" data-attempt title="ما ردش: زيد محاولة">+1</button>' : ''}</td>
+      ${['new', 'no_answer', 'postponed'].includes(o.status) ? '<button class="plus" data-attempt title="ما ردش: الفاشلة اللي بعدها">+1</button>' : ''}</td>
     <td class="nowrap">${statusCell(o)}${o.dispatch_error ? `<div class="err" title="${esc(o.dispatch_error)}">خطأ إرسال</div>` : ''}</td>
     <td>${text('address', o.address, 'style="width:120px"')}</td>
     <td>${can('products') && edit
@@ -791,7 +797,7 @@ async function openOrder(id) {
   const o = await api('GET', `/orders/${id}`);
   const open = ['new', 'no_answer', 'postponed'].includes(o.status);
   const box = modal.open(`
-    <h3>${esc(o.reference)} ${badge(o.status)}</h3>
+    <h3>${esc(o.reference)} ${o.status === 'no_answer' ? `<span class="badge no_answer">${failedLabel(o)}</span>` : badge(o.status)}</h3>
     ${o.dispatch_error ? `<div class="alert">خطأ في الإرسال لشركة التوصيل: ${esc(o.dispatch_error)}</div>` : ''}
     ${o.duplicate_of ? `<div class="alert">طلبية مكررة محتملة (نفس الرقم ونفس المنتج، #${o.duplicate_of})</div>` : ''}
     <div class="grid2">
@@ -810,7 +816,7 @@ async function openOrder(id) {
     <div class="actions" style="margin-top:10px">
       ${open ? `
         <button class="btn primary" data-action="confirm">✔ تأكيد وإرسال</button>
-        <button class="btn" data-action="no_answer">ما ردش</button>
+        <button class="btn" data-action="no_answer">ما ردش (الفاشلة ${(o.call_attempts || 0) + 1})</button>
         <button class="btn" data-action="postpone">تأجيل</button>
         <button class="btn danger" data-action="cancel">إلغاء</button>` : ''}
       ${o.status === 'confirmed' ? `

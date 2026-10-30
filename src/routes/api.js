@@ -175,6 +175,8 @@ export function apiRouter(db) {
   const TRACKING_STATUSES = ['confirmed', 'dispatched', 'delivered', 'returned'];
   const TRACKING_ACTIONS = ['delivered', 'returned', 'return_received'];
   const ordersAccess = requirePerm('confirm', 'tracking');
+  const FAILED_RE = /^failed_([1-5])$/;
+  const FAILED_N = (alias) => `LEAST(5, GREATEST(1, ${alias}.call_attempts))`;
   const allowedStatuses = (user) => [
     ...(can(user, 'confirm') ? CONFIRM_STATUSES : []), ...(can(user, 'tracking') ? TRACKING_STATUSES : []),
   ];
@@ -196,9 +198,16 @@ export function apiRouter(db) {
     const where = [];
     const args = [];
     const allowed = allowedStatuses(c.get('user'));
-    const asked = q.status ? String(q.status).split(',').filter((s) => STATUSES.includes(s)) : [];
-    const list = (asked.length ? asked : allowed).filter((s) => allowed.includes(s));
-    if (list.length < STATUSES.length) where.push(`o.status IN (${list.map(() => '?').join(',') || 'NULL'})`), args.push(...list);
+    const tokens = q.status ? String(q.status).split(',') : [];
+    const asked = tokens.filter((s) => STATUSES.includes(s));
+    // failed_N: "ما ردش" orders on their Nth failed call (failed_5 = 5 or more).
+    const failed = can(c.get('user'), 'confirm') ? tokens.map((s) => FAILED_RE.exec(s)?.[1]).filter(Boolean).map(Number) : [];
+    const list = (asked.length || failed.length ? asked : allowed).filter((s) => allowed.includes(s));
+    if (failed.length) {
+      where.push(`(o.status IN (${list.map(() => '?').join(',') || 'NULL'})
+        OR (o.status = 'no_answer' AND ${FAILED_N('o')} IN (${failed.map(() => '?').join(',')})))`);
+      args.push(...list, ...failed);
+    } else if (list.length < STATUSES.length) where.push(`o.status IN (${list.map(() => '?').join(',') || 'NULL'})`), args.push(...list);
     const mine = mineOnly(c.get('user'));
     if (mine) where.push(mine.sql), args.push(...mine.args);
     if (q.assigned_to === 'none') where.push('o.assigned_to IS NULL');
@@ -243,8 +252,16 @@ export function apiRouter(db) {
   r.get('/orders/counts', ordersAccess, async (c) => {
     const allowed = allowedStatuses(c.get('user'));
     const mine = mineOnly(c.get('user'), 'orders');
-    const rows = await db.all(`SELECT status, COUNT(*) AS n FROM orders ${mine ? `WHERE ${mine.sql}` : ''} GROUP BY status`, ...(mine?.args || []));
-    return c.json({ by_status: Object.fromEntries(rows.filter((x) => allowed.includes(x.status)).map((x) => [x.status, x.n])) });
+    const rows = await db.all(`SELECT CASE WHEN status = 'no_answer' THEN 'failed_' || ${FAILED_N('orders')} ELSE status END AS status,
+      COUNT(*) AS n FROM orders ${mine ? `WHERE ${mine.sql}` : ''} GROUP BY 1`, ...(mine?.args || []));
+    const byStatus = {};
+    for (const x of rows) {
+      const status = x.status.startsWith('failed_') ? 'no_answer' : x.status;
+      if (!allowed.includes(status)) continue;
+      if (status !== x.status) byStatus[x.status] = Number(x.n);
+      byStatus[status] = (byStatus[status] || 0) + Number(x.n);
+    }
+    return c.json({ by_status: byStatus });
   });
 
   // The admin gives orders to a confirmation agent (as_new: start them again as new orders).
