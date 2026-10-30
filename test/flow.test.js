@@ -807,6 +807,7 @@ test('LightFunnels app: signed webhooks import orders once, bad ones are kept wi
   const link = (await api('POST', '/api/lightfunnels', { name: 'compte test', store_id: store.id })).body;
   const list = (await api('GET', '/api/lightfunnels')).body;
   assert.equal(list.configured, true);
+  assert.deepEqual(list.missing, []);
   assert.equal(list.links[0].connected, false);
 
   const send = (topic, payload, { sign = true } = {}) => {

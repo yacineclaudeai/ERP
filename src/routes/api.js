@@ -546,6 +546,7 @@ export function apiRouter(db) {
   // ---- direct LightFunnels connection (OAuth app + order webhooks) ----
   r.get('/lightfunnels', requirePerm('sheets'), async (c) => c.json({
     configured: lf.configured(),
+    missing: lf.missingKeys(),
     redirect_uri: lf.redirectUri(new URL(c.req.url).origin),
     links: await db.all(`SELECT l.id, l.name, l.store_id, s.name AS store_name, l.webhooks, l.imported_count, l.last_event_at,
         l.last_error, l.active, (l.access_token IS NOT NULL) AS connected
