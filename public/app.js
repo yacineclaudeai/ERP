@@ -474,6 +474,7 @@ async function ordersPage(mode = 'confirm') {
       <input class="grow" name="q" placeholder="بحث: الاسم، الهاتف، رقم الطلبية، التراكينغ" value="${esc(f.q)}">
       <button class="btn">بحث</button>
       ${ORDER_FILTERS.some((k) => !['status', 'page'].includes(k) && f[k]) ? '<button class="btn" type="button" id="clear">مسح الفلاتر</button>' : ''}
+      ${assigning ? '<button class="btn" type="button" id="pull" title="يجيب دوكا الطلبيات الجديدة من LightFunnels ومن الشيتات">تحديث الطلبيات</button>' : ''}
       ${mode === 'confirm' ? '<button class="btn primary" type="button" id="new-order">+ طلبية يدوية</button>' : ''}
       ${can('tracking') && mode === 'tracking' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
     </form>
@@ -530,6 +531,17 @@ async function ordersPage(mode = 'confirm') {
   if (clear) clear.onclick = () => go(Object.fromEntries(ORDER_FILTERS.filter((k) => k !== 'status').map((k) => [k, ''])));
   const add = main.querySelector('#new-order');
   if (add) add.onclick = () => orderForm(null, products);
+  const pull = main.querySelector('#pull');
+  if (pull) {
+    pull.onclick = guard(async () => {
+      pull.disabled = true;
+      pull.textContent = 'جاري التحديث...';
+      const r = await api('POST', '/orders/pull');
+      const errors = [...r.sheet_errors, ...r.lightfunnels_errors];
+      toast(`دخلو ${r.lightfunnels} من LightFunnels و${r.sheets} من الشيتات${errors.length ? `. أخطاء: ${errors.slice(0, 2).join(' | ')}` : ''}`, errors.length > 0);
+      router();
+    });
+  }
   const sync = main.querySelector('#sync');
   if (sync) {
     sync.onclick = guard(async () => {

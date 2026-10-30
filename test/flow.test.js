@@ -867,3 +867,49 @@ test('LightFunnels app: signed webhooks import orders once, bad ones are kept wi
   delete process.env.LF_CLIENT_ID;
   delete process.env.LF_CLIENT_SECRET;
 });
+
+test('"update orders" button: pulls the latest LightFunnels orders that webhooks did not bring', async () => {
+  process.env.LF_CLIENT_ID = 'test-client';
+  process.env.LF_CLIENT_SECRET = 'test-secret';
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const { id } = (await api('POST', '/api/lightfunnels', { name: 'compte pull' })).body;
+  await db.run("UPDATE lightfunnels_links SET access_token = 'tok', expires_at = now() + interval '1 hour' WHERE id = ?", id);
+  const kinds = {
+    Order: { id: 'ID', _id: 'Int', name: 'String', total: 'Float', shipping: 'Float', test: 'Boolean', date: 'String', customer: 'Customer', shipping_address: 'Address', items: 'OrderItem' },
+    Customer: { full_name: 'String' },
+    Address: { first_name: 'String', phone: 'String', address1: 'String', city: 'String', state: 'String' },
+    OrderItem: { title: 'String', price: 'Float', qty: 'Int' },
+  };
+  const real = globalThis.fetch;
+  let ordersQuery = '';
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).startsWith('https://services.lightfunnels.com')) return real(url, init);
+    const { query, variables } = JSON.parse(init.body);
+    if (query.includes('__type')) {
+      const fields = Object.entries(kinds[variables.n]).map(([name, t]) => ({ name,
+        type: { name: kinds[t] ? t : t, kind: kinds[t] ? 'OBJECT' : 'SCALAR', ofType: null } }));
+      return Response.json({ data: { __type: { fields } } });
+    }
+    ordersQuery = query;
+    return Response.json({ data: { orders: { edges: [{ node: {
+      id: 'order_pull', _id: 5001, name: '#LF5001', total: 3100, shipping: 600, test: false, date: '2026-10-30T10:00:00Z',
+      customer: { full_name: 'Pull Client' },
+      shipping_address: { first_name: 'Pull', phone: '0551990033', address1: 'Rue 2', city: 'Oran', state: 'Oran' },
+      items: [{ title: 'LF Pull Item', price: 2500, qty: 1 }],
+    } }] } } });
+  };
+  try {
+    const r = (await api('POST', '/api/orders/pull')).body;
+    assert.equal(r.lightfunnels, 1);
+    assert.deepEqual(r.lightfunnels_errors, []);
+    assert.match(ordersQuery, /shipping_address \{ first_name phone address1 city state \}/);
+    const found = (await api('GET', '/api/orders?q=0551990033')).body.rows;
+    assert.equal(found.length, 1);
+    assert.equal(found[0].wilaya_code, 31);
+    assert.equal((await api('POST', '/api/orders/pull')).body.lightfunnels, 0, 'the same order is not imported twice');
+  } finally {
+    globalThis.fetch = real;
+    delete process.env.LF_CLIENT_ID;
+    delete process.env.LF_CLIENT_SECRET;
+  }
+});

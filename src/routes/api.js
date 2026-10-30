@@ -18,7 +18,7 @@ import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
 import { scanStore, applyStoreLinks, normalizeName, newProductStore } from '../services/branches.js';
-import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet } from '../services/sheets.js';
+import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet, syncAllSheets } from '../services/sheets.js';
 import * as lf from '../services/lightfunnels.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
@@ -289,6 +289,30 @@ export function apiRouter(db) {
     const n = Math.max(0, Math.min(20, Math.floor(Number(body(c).auto_transfer_after)) || 0));
     await setSetting(db, 'auto_transfer_after', String(n));
     return c.json({ auto_transfer_after: n });
+  });
+
+  // The "update" button of the confirmation page: reads the Google Sheets and the LightFunnels accounts now.
+  r.post('/orders/pull', requireAdmin, async (c) => {
+    const sheets = await syncAllSheets(db);
+    const lfLinks = await db.all('SELECT * FROM lightfunnels_links WHERE active AND access_token IS NOT NULL ORDER BY id');
+    const lightfunnels = { imported: 0, errors: [] };
+    for (const link of lfLinks) {
+      try {
+        const r = await lf.pullRecent(db, link);
+        lightfunnels.imported += r.imported;
+        lightfunnels.errors.push(...r.errors);
+      } catch (e) {
+        if (!(e instanceof HttpError)) throw e;
+        lightfunnels.errors.push(`${link.name}: ${e.message}`);
+        await db.run('UPDATE lightfunnels_links SET last_error = ? WHERE id = ?', e.message, link.id);
+      }
+    }
+    return c.json({
+      sheets: Object.values(sheets).reduce((a, x) => a + (x.imported || 0), 0),
+      sheet_errors: Object.values(sheets).flatMap((x) => x.errors || []),
+      lightfunnels: lightfunnels.imported,
+      lightfunnels_errors: lightfunnels.errors,
+    });
   });
 
   r.get('/orders/:id', ordersAccess, async (c) => {
