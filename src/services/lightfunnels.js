@@ -2,7 +2,7 @@
 // The user accepts the app once (OAuth), then LightFunnels sends each new order by webhook.
 import crypto from 'node:crypto';
 import { HttpError, createOrder, deleteOrder, updateOrder } from './orders.js';
-import { parseWilaya, productFor, sheetPhone } from './sheets.js';
+import { parseWilaya, productFor, sheetPhone, splitVariant } from './sheets.js';
 
 const AUTHORIZE_URL = 'https://app.lightfunnels.com/admin/oauth';
 const TOKEN_URL = 'https://api.lightfunnels.com/api/v3/access_token';
@@ -82,7 +82,7 @@ async function graphql(db, link, query, variables) {
 // LightFunnels refuses introspection, so the fields are written out (developer.lightfunnels.com/orders/types).
 const ADDRESS = 'shipping_address { first_name last_name phone line1 line2 city area state }';
 const ORDER_FIELDS = `id _id name total shipping test created_at notes phone customer { full_name phone } ${ADDRESS}
-  items { ... on VariantSnapshot { title sku price variant { title } } ... on OrderBumpSnapshot { title sku price } }`;
+  items { ... on VariantSnapshot { title sku price variant { title product { title } } } ... on OrderBumpSnapshot { title sku price product { title } } }`;
 const CHECKOUT_FIELDS = `id _id phone total created_at recovered customer { full_name first_name last_name phone } ${ADDRESS}
   variants { quantity variant { title sku price product { title } } }`;
 
@@ -192,13 +192,20 @@ export function nodeToOrder(node) {
   // Some landing pages put the wilaya in the city field and leave the state empty.
   const wilaya = parseWilaya(stateRaw) || parseWilaya(pick(node, 'shipping_address.city'));
   if (!wilaya) throw new HttpError(400, `ولاية غير معروفة "${stateRaw ?? ''}"`);
-  const items = ([node.items, node.line_items, node.lines, node.products].find(Array.isArray) || []).map((i) => ({
-    title: text(pick(i, 'title', 'name', 'product.title')),
-    sku: text(pick(i, 'sku', 'variant.sku')),
-    quantity: Math.max(1, Math.floor(num(pick(i, 'quantity', 'qty')) ?? 1)),
-    price: num(pick(i, 'price', 'unit_price')),
-    variant: variantOnly(text(pick(i, 'title', 'name', 'product.title')), text(pick(i, 'variant_title', 'variant.title', 'variant_name'))),
-  })).filter((i) => i.title || i.sku).reduce((acc, i) => {
+  const items = ([node.items, node.line_items, node.lines, node.products].find(Array.isArray) || []).map((i) => {
+    // The product name without its options: from the product itself when sent, else cut from the line title.
+    const full = text(pick(i, 'title', 'name'));
+    const [cut, rest] = splitVariant(full);
+    const title = text(pick(i, 'product.title', 'variant.product.title', 'product_title')) || cut;
+    return {
+      title,
+      sku: text(pick(i, 'sku', 'variant.sku')),
+      quantity: Math.max(1, Math.floor(num(pick(i, 'quantity', 'qty')) ?? 1)),
+      price: num(pick(i, 'price', 'unit_price')),
+      variant: variantOnly(title, text(pick(i, 'variant_title', 'variant_name'))) || variantOnly(title, full) || rest
+        || variantOnly(title, text(pick(i, 'variant.title'))),
+    };
+  }).filter((i) => i.title || i.sku).reduce((acc, i) => {
     const same = acc.find((x) => x.title === i.title && x.sku === i.sku && x.price === i.price && x.variant === i.variant);
     if (same) same.quantity += i.quantity; else acc.push(i);
     return acc;

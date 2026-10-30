@@ -984,3 +984,26 @@ test('only the admin changes the main product of an order; an agent can add anot
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
   assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: b.id })).status, 200, 'the admin can');
 });
+
+test('LightFunnels options stay out of the product name; old variant products are merged', async () => {
+  const { splitVariant } = await import('../src/services/sheets.js');
+  assert.deepEqual(splitVariant('pack 3 robes de nuit Tailles:M/38Packs:Pack 5'), ['pack 3 robes de nuit', 'Tailles:M/38Packs:Pack 5']);
+  assert.deepEqual(splitVariant('Pyjama léopard classe ✨🐆 Taille :Xl/42'), ['Pyjama léopard classe ✨🐆', 'Taille :Xl/42']);
+  assert.deepEqual(splitVariant('Pyjama simple'), ['Pyjama simple', null]);
+  const { nodeToOrder } = await import('../src/services/lightfunnels.js');
+  const parsed = nodeToOrder({ shipping_address: { first_name: 'A', phone: '0551990066', state: 'Oran' },
+    items: [{ title: '2pyjamas3pcs2200 tailles:S/36Pack:Namri+jaune', price: 2200 }] });
+  assert.deepEqual([parsed.items[0].title, parsed.variant], ['2pyjamas3pcs2200', 'tailles:S/36Pack:Namri+jaune']);
+
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const mk = async (name) => (await db.run("INSERT INTO products (name, price, public_key) VALUES (?, 2200, ?) RETURNING id", name, `sheet-${name}`)).rows[0].id;
+  const a = await mk('Robe merge tailles:S/36');
+  const b = await mk('Robe merge tailles:XL/42');
+  const o = (await api('POST', '/api/orders', { product_id: b, customer_name: 'M', phone: '0551990077', wilaya_code: 16 })).body;
+  const r = (await api('POST', '/api/products/merge-variants')).body;
+  assert.equal(r.merged.length, 2);
+  assert.equal((await db.get('SELECT name FROM products WHERE id = ?', a)).name, 'Robe merge');
+  assert.equal(await db.get('SELECT id FROM products WHERE id = ?', b), undefined);
+  const moved = (await api('GET', `/api/orders/${o.id}`)).body;
+  assert.deepEqual([moved.product_id, moved.variant], [a, 'tailles:XL/42']);
+});

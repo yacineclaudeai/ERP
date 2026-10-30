@@ -18,7 +18,7 @@ import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
 import { scanStore, applyStoreLinks, normalizeName, newProductStore } from '../services/branches.js';
-import { SHEET_FIELDS, fetchSheetRows, suggestMapping, syncSheet, syncAllSheets } from '../services/sheets.js';
+import { SHEET_FIELDS, fetchSheetRows, mergeVariantProducts, suggestMapping, syncSheet, syncAllSheets } from '../services/sheets.js';
 import * as lf from '../services/lightfunnels.js';
 
 const newKey = () => crypto.randomBytes(12).toString('base64url');
@@ -101,6 +101,8 @@ export function apiRouter(db) {
     });
     return c.json(product, 201);
   });
+
+  r.post('/products/merge-variants', requireAdmin, async (c) => c.json(await mergeVariantProducts(db)));
 
   r.put('/products/:id', requirePerm('products'), async (c) => {
     const id = idParam(c);

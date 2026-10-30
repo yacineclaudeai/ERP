@@ -138,6 +138,16 @@ export function sheetPhone(v) {
 
 // The product a row is for: same name or SKU in this store, else created with stock 0
 // in the store for new products (TEST), or in the sheet's store.
+// "Pyjama léopard Taille :XL/42Couleur:Noir" -> ["Pyjama léopard", "Taille :XL/42Couleur:Noir"]: LightFunnels
+// appends "Label:value" options to the product title. A name without such a part is returned as is.
+export function splitVariant(name) {
+  const s = String(name ?? '').trim();
+  const m = /(^|\s)\p{L}[\p{L}\p{M}]*\s*:/u.exec(s);
+  if (!m || m.index === 0) return [s, null];
+  const base = s.slice(0, m.index).trim();
+  return base.length >= 3 ? [base, s.slice(m.index).trim()] : [s, null];
+}
+
 export async function productFor(db, source, name, sku, unitPrice) {
   const key = fold(name);
   const products = await db.all('SELECT id, name, sku, store_id FROM products');
@@ -248,4 +258,37 @@ export async function syncAllSheets(db) {
   const out = {};
   for (const s of sources) out[s.name] = await syncSheet(db, s);
   return out;
+}
+
+// Products auto-created with their options in the name ("Pyjama Taille:XL/42") are merged into one product
+// per name: their orders move to it with the options kept as the order's variant. Products made by hand stay.
+const PRODUCT_TABLES = ['product_costs', 'product_expenses', 'product_purchases', 'stock_movements', 'ad_spend', 'ad_campaigns'];
+export async function mergeVariantProducts(db) {
+  const all = await db.all("SELECT * FROM products WHERE public_key LIKE 'sheet-%' ORDER BY id");
+  const merged = [];
+  for (const p of all) {
+    const [base, variant] = splitVariant(p.name);
+    if (!variant) continue;
+    await db.tx(async (t) => {
+      let target = (await t.all('SELECT id, name, store_id FROM products WHERE id <> ?', p.id))
+        .find((x) => fold(x.name) === fold(base) && (x.store_id === p.store_id || !p.store_id));
+      if (!target) {
+        // The first one of its kind becomes the product, under the clean name.
+        await t.run('UPDATE products SET name = ? WHERE id = ?', base, p.id);
+        await t.run('UPDATE orders SET variant = COALESCE(variant, ?) WHERE product_id = ?', variant, p.id);
+        merged.push({ from: p.name, to: base });
+        return;
+      }
+      await t.run('UPDATE orders SET variant = COALESCE(variant, ?), product_id = ? WHERE product_id = ?', variant, target.id, p.id);
+      await t.run('UPDATE order_items SET product_id = ? WHERE product_id = ?', target.id, p.id);
+      for (const table of PRODUCT_TABLES) {
+        if (table === 'product_costs') continue;
+        await t.run(`UPDATE ${table} SET product_id = ? WHERE product_id = ?`, target.id, p.id);
+      }
+      if (p.stock) await t.run('UPDATE products SET stock = stock + ? WHERE id = ?', p.stock, target.id);
+      await t.run('DELETE FROM products WHERE id = ?', p.id);
+      merged.push({ from: p.name, to: base });
+    });
+  }
+  return { merged };
 }

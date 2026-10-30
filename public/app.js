@@ -1237,7 +1237,8 @@ async function productsPage() {
     <h2>المنتجات</h2>
     ${isAdmin ? `<div class="bar"><button class="btn primary" id="add">+ منتج جديد</button>
       <button class="btn primary hidden" id="save-all"></button>
-      <button class="btn" id="link-stores" title="يقرا الطرود اللي بعثها كل فرع عند شركة التوصيل تاعو، ويعرف منها كل منتج لأنهي فرع">ربط المنتجات بالفروع تلقائياً</button></div>` : ''}
+      <button class="btn" id="link-stores" title="يقرا الطرود اللي بعثها كل فرع عند شركة التوصيل تاعو، ويعرف منها كل منتج لأنهي فرع">ربط المنتجات بالفروع تلقائياً</button>
+      <button class="btn" id="merge-variants" title="المنتجات اللي تسجلو بالمقاس واللون في الاسم يولو منتج واحد، والمقاس/اللون يروح لعمود المتغير في الطلبيات">جمع المنتجات المكررة بالمتغير</button></div>` : ''}
     <div class="table-wrap"><table>
       <tr><th>المنتج</th><th>البوتيك</th><th>شركة التوصيل</th>${team ? '<th title="الفاشلة تاع هاد المنتج تروح للمؤكدة 2، ومن بعد للمؤكدة 3">المؤكدة 2</th><th>المؤكدة 3</th>' : ''}<th>السعر</th><th>سعر الشراء</th><th>المخزون</th><th>صفحة الهبوط</th><th>طلبيات</th><th></th></tr>
       ${products.map((p) => `<tr data-product="${p.id}">
@@ -1298,6 +1299,13 @@ async function productsPage() {
   if (add) add.onclick = () => productForm(null, stores);
   const link = main.querySelector('#link-stores');
   if (link) link.onclick = guard(() => linkStoresDialog(stores));
+  const merge = main.querySelector('#merge-variants');
+  if (merge) merge.onclick = guard(async () => {
+    if (!confirm('نجمعو المنتجات اللي فيها المقاس/اللون في الاسم في منتج واحد؟')) return;
+    const r = await api('POST', '/products/merge-variants');
+    toast(r.merged.length ? `تجمعو ${r.merged.length} منتج` : 'ما كاش منتجات مكررة بالمتغير');
+    router();
+  });
   main.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => productForm(byId(b.dataset.edit), stores)));
   main.querySelectorAll('[data-embed]').forEach((b) => (b.onclick = () => embedDialog(byId(b.dataset.embed))));
   main.querySelectorAll('[data-stock]').forEach((b) => (b.onclick = guard(() => stockDialog(byId(b.dataset.stock)))));
