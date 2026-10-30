@@ -91,18 +91,43 @@ async function fieldsOf(db, link, typeName) {
   return out;
 }
 
-// "orders { ... }" selection: the scalar fields of an order, plus the scalar fields of its customer,
-// addresses and items. Works whatever the exact names are, the order reader tries several spellings.
-async function orderSelection(db, link) {
-  const order = await fieldsOf(db, link, 'Order');
-  const flat = (have) => Object.entries(have).filter(([, f]) => f.kind === 'SCALAR' || f.kind === 'ENUM').map(([n]) => n);
-  const parts = flat(order);
-  for (const name of ['customer', 'shipping_address', 'billing_address', 'items']) {
-    if (order[name]?.kind !== 'OBJECT') continue;
-    const inner = flat(await fieldsOf(db, link, order[name].type));
+// Selection of an object type: its scalar fields, plus the scalar fields of its customer, addresses
+// and items. Works whatever the exact names are, the order reader tries several spellings.
+const NESTED = /^(customer|contact|shipping_address|billing_address|address|items|line_items|lines|products)$/;
+async function typeSelection(db, link, typeName) {
+  const have = await fieldsOf(db, link, typeName);
+  const flat = (f) => Object.entries(f).filter(([, x]) => x.kind === 'SCALAR' || x.kind === 'ENUM').map(([n]) => n);
+  const parts = flat(have);
+  for (const [name, f] of Object.entries(have)) {
+    if (f.kind !== 'OBJECT' || !NESTED.test(name)) continue;
+    const inner = flat(await fieldsOf(db, link, f.type));
     if (inner.length) parts.push(`${name} { ${inner.join(' ')} }`);
   }
   return parts.join(' ');
+}
+const orderSelection = (db, link) => typeSelection(db, link, 'Order');
+
+// The checkout webhook only carries the checkout id: the details are read back from the API.
+// The query to use is found by asking the API which root field returns a Checkout.
+const typeRef = `type { name kind ofType { name kind ofType { name kind } } }`;
+const unwrap = (t) => { while (t && !t.name) t = t.ofType; return t; };
+const sdl = (t) => (t.kind === 'NON_NULL' ? `${sdl(t.ofType)}!` : t.kind === 'LIST' ? `[${sdl(t.ofType)}]` : t.name);
+export async function fetchCheckout(db, link, id) {
+  const schema = await graphql(db, link, `{ __schema { queryType { fields { name args { name ${typeRef} } ${typeRef} } } } }`);
+  const fields = schema.__schema?.queryType?.fields || [];
+  const sel = await typeSelection(db, link, 'Checkout');
+  const direct = fields.find((f) => unwrap(f.type)?.name === 'Checkout' && f.args.some((a) => /^(id|_id)$/.test(a.name)));
+  if (direct) {
+    const arg = direct.args.find((a) => /^(id|_id)$/.test(a.name));
+    const d = await graphql(db, link, `query($id: ${sdl(arg.type)}) { r: ${direct.name}(${arg.name}: $id) { ${sel} } }`, { id: /Int/.test(sdl(arg.type)) ? Number(id) : id });
+    return d.r;
+  }
+  const node = fields.find((f) => f.name === 'node');
+  if (node) {
+    const d = await graphql(db, link, `query($id: ID!) { r: node(id: $id) { ... on Checkout { ${sel} } } }`, { id });
+    return d.r;
+  }
+  throw new HttpError(502, `ما لقيتش كيفاش نقرا الـ checkout (${fields.map((f) => f.name).filter((n) => /checkout/i.test(n)).join(', ') || 'لا شيء'})`);
 }
 
 // Catch-up: reads the latest orders of the account and imports the ones the webhooks did not bring.
@@ -184,14 +209,15 @@ const text = (v) => (v == null ? null : String(v).trim() || null);
 export function nodeToOrder(node) {
   const ship = node.shipping_address || {};
   const name = text(ship.full_name) || text([ship.first_name, ship.last_name].filter(Boolean).join(' '))
-    || text(pick(node, 'customer.full_name', 'billing_address.full_name'));
+    || text(pick(node, 'customer.full_name', 'billing_address.full_name', 'full_name', 'customer_name'))
+    || text([pick(node, 'customer.first_name', 'first_name'), pick(node, 'customer.last_name', 'last_name')].filter(Boolean).join(' '));
   if (!name) throw new HttpError(400, 'الاسم ناقص');
   const phone = sheetPhone(pick(node, 'shipping_address.phone', 'customer.phone', 'billing_address.phone', 'phone'));
   if (!phone) throw new HttpError(400, `رقم غير صحيح "${pick(node, 'shipping_address.phone', 'customer.phone') ?? ''}"`);
   const stateRaw = pick(node, 'shipping_address.state', 'shipping_address.province', 'shipping_address.state_code', 'shipping_address.region');
   const wilaya = parseWilaya(stateRaw);
   if (!wilaya) throw new HttpError(400, `ولاية غير معروفة "${stateRaw ?? ''}"`);
-  const items = (Array.isArray(node.items) ? node.items : Array.isArray(node.line_items) ? node.line_items : []).map((i) => ({
+  const items = ([node.items, node.line_items, node.lines, node.products].find(Array.isArray) || []).map((i) => ({
     title: text(pick(i, 'title', 'name', 'product.title')),
     sku: text(pick(i, 'sku', 'variant.sku')),
     quantity: Math.max(1, Math.floor(num(pick(i, 'quantity', 'qty')) ?? 1)),
@@ -256,20 +282,25 @@ export async function handleOrderEvent(db, link, topic, node) {
 export async function handleCheckoutEvent(db, link, node) {
   const rawId = text(node._id ?? node.id);
   if (!rawId) throw new HttpError(400, 'رقم الـ checkout ناقص');
-  if (node.test === true) return { ignored: 'test' };
+  if (!node.items && !node.line_items && !node.shipping_address) {
+    const full = await fetchCheckout(db, link, text(node.id) ?? rawId);
+    if (!full) return { ignored: 'checkout ما لقيناهش' };
+    node = { ...node, ...full };
+  }
+  if (node.test === true) return { ignored: 'test', node };
   const lfId = `co:${rawId}`;
   let parsed;
   try {
     parsed = nodeToOrder(node);
   } catch (e) {
     if (!(e instanceof HttpError)) throw e;
-    return { ignored: `ناقص: ${e.message}` };
+    return { ignored: `ناقص: ${e.message}`, node };
   }
   if (await db.get("SELECT 1 AS x FROM orders WHERE phone = ? AND source = 'lightfunnels' AND created_at > now() - interval '3 days'", parsed.phone)) {
-    return { ignored: 'الزبون دار الطلبية' };
+    return { ignored: 'الزبون دار الطلبية', node };
   }
   const claim = await db.run('INSERT INTO lightfunnels_orders (link_id, lf_order_id) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING lf_order_id', link.id, lfId);
-  if (!claim.rows.length) return { duplicate: true };
+  if (!claim.rows.length) return { duplicate: true, node };
   try {
     const [main, ...rest] = await orderLines(db, link, parsed);
     const order = await createOrder(db, {
@@ -279,7 +310,7 @@ export async function handleCheckoutEvent(db, link, node) {
       notes: parsed.notes, items: rest,
     }, { source: 'abandoned' });
     await db.run('UPDATE lightfunnels_orders SET order_id = ? WHERE link_id = ? AND lf_order_id = ?', order.id, link.id, lfId);
-    return { order_id: order.id };
+    return { order_id: order.id, node };
   } catch (e) {
     await db.run('DELETE FROM lightfunnels_orders WHERE link_id = ? AND lf_order_id = ?', link.id, lfId);
     throw e;
