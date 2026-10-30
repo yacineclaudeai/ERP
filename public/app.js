@@ -1469,7 +1469,7 @@ async function sheetsPage() {
   const [sheets, stores] = await Promise.all([api('GET', '/sheets'), api('GET', '/stores')]);
   const main = shell(`
     <h2>الشيتات</h2>
-    <p class="muted">الطلبيات تدخل وحدها من Google Sheets (كيما LightFunnels) كل دقيقة. الشيت لازم يكون مشارك: Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur. الطلبيات المتروكة (Abandoned) تدخل للتأكيد بعلامة "متروكة"، والطلبيات من شيت وهمي تدخل بحالة "وهمية" وما تتبعثش للتوصيل.</p>
+    <p class="muted">الطلبيات تدخل وحدها من Google Sheets (كيما LightFunnels) كل 5 دقايق. الشيت لازم يكون مشارك: Partager ← "Tous les utilisateurs disposant du lien" ← Lecteur. الطلبيات المتروكة (Abandoned) تدخل للتأكيد بعلامة "متروكة"، والطلبيات من شيت وهمي تدخل بحالة "وهمية" وما تتبعثش للتوصيل.</p>
     <div class="bar"><button class="btn primary" id="add">+ شيت</button></div>
     <div class="table-wrap"><table>
       <tr><th>الشيت</th><th>البوتيك</th><th>النوع</th><th>دخلو</th><th>آخر مرة</th><th>أخطاء</th><th></th></tr>

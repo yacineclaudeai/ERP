@@ -2,7 +2,7 @@ import { getConnectionString } from '@netlify/database';
 import { openPgDb } from '../../src/db.js';
 import { syncAllSheets } from '../../src/services/sheets.js';
 
-// Every minute, import the new rows of the Google Sheets set up on the "الشيتات" page.
+// Every 5 minutes, import the new rows of the Google Sheets set up on the "الشيتات" page.
 export default async () => {
   const db = openPgDb(getConnectionString());
   try {
@@ -12,4 +12,4 @@ export default async () => {
   }
 };
 
-export const config = { schedule: '* * * * *' };
+export const config = { schedule: '*/5 * * * *' };
