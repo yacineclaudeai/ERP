@@ -68,7 +68,10 @@ export function publicRouter(db) {
       const payload = JSON.parse(raw);
       node = payload.node ?? payload;
       const result = topic === 'checkout' ? await lf.handleCheckoutEvent(db, link, node) : await lf.handleOrderEvent(db, link, topic, node);
-      if (result.ignored && topic === 'checkout') console.log('lightfunnels checkout ignored:', result.ignored, JSON.stringify(result.node ?? node).slice(0, 1500));
+      if (topic === 'checkout') {
+        console.log('lightfunnels checkout', result.ignored ? `ignored: ${result.ignored}` : result.duplicate ? 'duplicate' : `imported order ${result.order_id}`,
+          JSON.stringify(result.node ?? node).slice(0, 1500));
+      }
       await lf.recordEvent(db, link, topic, result.node ?? node, result.ignored ? 'ignored' : result.duplicate ? 'duplicate' : 'imported', typeof result.ignored === 'string' ? result.ignored : null, result.order_id);
       return c.json({ ok: true });
     } catch (e) {

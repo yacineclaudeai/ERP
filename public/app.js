@@ -35,7 +35,7 @@ const wilayaOptions = (selected) => state.meta.wilayas
   .map((w) => `<option value="${w.code}" ${Number(selected) === w.code ? 'selected' : ''}>${w.code} - ${w.name_ar} / ${w.name_fr}</option>`).join('');
 const today = () => new Date().toISOString().slice(0, 10);
 // Timestamps come from the server in UTC; show them in Algeria time.
-const fmtDate = (v) => (v ? new Date(v).toLocaleString('fr-DZ', { timeZone: 'Africa/Algiers', dateStyle: 'short', timeStyle: 'short' }) : '');
+const fmtDate = (v) => (v ? new Date(v).toLocaleString('fr-FR', { timeZone: 'Africa/Algiers', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : '');
 
 async function api(method, path, body) {
   const res = await fetch(`/api${path}`, {
