@@ -230,11 +230,13 @@ test('a confirmation agent edits an order from the table, product included', asy
   const agent = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'agent1');
   await api('POST', '/api/orders/assign', { ids: [o.id], user_id: agent.id });
 
-  await api('POST', '/api/auth/login', { username: 'agent1', password: 'agent123' });
+  // Changing the main product is for the admin only; the agent edits the rest.
   let r = await api('PUT', `/api/orders/${o.id}`, { product_id: b.id });
   assert.equal(r.status, 200);
   assert.equal(r.body.product_name, 'Parfum B');
   assert.equal(r.body.unit_price, 3000, 'takes the new product price');
+  await api('POST', '/api/auth/login', { username: 'agent1', password: 'agent123' });
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: a.id })).status, 403);
   r = await api('PUT', `/api/orders/${o.id}`, { stop_desk: true, commune: 'Hydra', quantity: 2 });
   assert.equal(r.body.commune, 'Hydra');
   assert.equal(r.body.total, 3000 * 2 + r.body.delivery_fee);
@@ -243,8 +245,8 @@ test('a confirmation agent edits an order from the table, product included', asy
   // Once confirmed the stock is held: the product can't change any more.
   await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' });
   assert.equal((await api('GET', '/api/products')).body.find((p) => p.id === b.id).stock, 3);
-  assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: a.id })).status, 409);
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: a.id })).status, 409);
 });
 
 test('no answer or postponed can go back to new', async () => {
@@ -912,4 +914,22 @@ test('"update orders" button: pulls the latest LightFunnels orders that webhooks
     delete process.env.LF_CLIENT_ID;
     delete process.env.LF_CLIENT_SECRET;
   }
+});
+
+test('only the admin changes the main product of an order; an agent can add another product', async () => {
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const a = (await api('POST', '/api/products', { name: 'Main one', price: 1000, stock: 5 })).body;
+  const b = (await api('POST', '/api/products', { name: 'Other one', price: 700, stock: 5 })).body;
+  await api('POST', '/api/users', { username: 'hamid', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  const hamid = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'hamid');
+  const o = (await api('POST', '/api/orders', { product_id: a.id, customer_name: 'A', phone: '0551880301', wilaya_code: 16 })).body;
+  await api('POST', '/api/orders/assign', { ids: [o.id], user_id: hamid.id });
+  await api('POST', '/api/auth/login', { username: 'hamid', password: 'secret1' });
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: b.id })).status, 403);
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: a.id, quantity: 2 })).status, 200, 'same product is fine');
+  const added = await api('PUT', `/api/orders/${o.id}`, { items: [{ product_id: b.id, quantity: 1 }] });
+  assert.equal(added.status, 200);
+  assert.equal(added.body.items.length, 1);
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { product_id: b.id })).status, 200, 'the admin can');
 });

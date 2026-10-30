@@ -697,9 +697,7 @@ function orderRow(o, products, companies, stores) {
     <td>${edit ? pick('stop_desk', [['0', 'المنزل'], ['1', 'مكتب']], o.stop_desk ? '1' : '0') : o.stop_desk ? 'مكتب' : 'المنزل'}</td>
     <td>${edit ? pick('wilaya_code', state.meta.wilayas.map((w) => [w.code, `${w.code} - ${w.name_fr}`]), o.wilaya_code, '', 'w') : esc(wilaya(o.wilaya_code))}</td>
     <td>${text('commune', o.commune, 'style="width:110px"')}</td>
-    <td>${edit && !o.stock_reserved
-      ? pick('product_id', products.filter((p) => p.active || p.id === o.product_id).map((p) => [p.id, p.name]), o.product_id, '', 'p')
-      : esc(o.product_name)}${o.items?.length ? `<div class="extra-items" title="${esc(o.items.map((i) => `${i.product_name} × ${i.quantity}`).join('، '))}">+ ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : ''}</td>
+    <td class="prod-cell">${esc(o.product_name)}${o.items?.length ? `<div class="extra-items" title="${esc(o.items.map((i) => `${i.product_name} × ${i.quantity}`).join('، '))}">+ ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : ''}</td>
     <td class="num">${num('unit_price', o.unit_price)}</td>
     <td class="num">${edit ? `<input class="cell num" data-field="quantity" value="${o.quantity}" type="number" min="1" style="width:44px">` : o.quantity}</td>
     <td class="num">${num('delivery_fee', o.delivery_fee, 56)}</td>
@@ -900,7 +898,10 @@ async function orderForm(order, products) {
   const box = modal.open(`
     <h3>${order ? `تعديل ${esc(order.reference)}` : 'طلبية جديدة'}</h3>
     <form class="stack" id="order-form">
-      ${order?.stock_reserved ? '' : `<label>المنتج<select name="product_id" required>${productOptions(o.product_id)}</select></label>`}
+      ${order?.stock_reserved ? '' : order && !isAdminUser()
+    // Only the admin changes the main product of an order; the others can add products below.
+    ? `<div><div class="muted">المنتج (المدير برك يبدلو)</div><div class="prod-cell"><b>${esc(o.product_name)}</b></div></div>`
+    : `<label>المنتج<select name="product_id" required>${productOptions(o.product_id)}</select></label>`}
       <div class="grid2">
         <label>الاسم<input name="customer_name" value="${esc(o.customer_name)}" required></label>
         <label>الهاتف<input name="phone" value="${esc(o.phone)}" required dir="ltr"></label>
