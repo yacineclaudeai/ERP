@@ -78,6 +78,52 @@ async function graphql(db, link, query, variables) {
   return data.data;
 }
 
+// Field names of a GraphQL type: { name: { type, kind } } (the API is only partly documented, so we ask it).
+async function fieldsOf(db, link, typeName) {
+  const d = await graphql(db, link, `query($n: String!) { __type(name: $n) { fields { name type { name kind ofType { name kind ofType { name kind ofType { name kind } } } } } } }`, { n: typeName });
+  const out = {};
+  for (const f of d.__type?.fields || []) {
+    let t = f.type;
+    while (t && !t.name) t = t.ofType;
+    out[f.name] = { type: t?.name || null, kind: t?.kind || null };
+  }
+  return out;
+}
+
+// "orders { ... }" selection: the scalar fields of an order, plus the scalar fields of its customer,
+// addresses and items. Works whatever the exact names are, the order reader tries several spellings.
+async function orderSelection(db, link) {
+  const order = await fieldsOf(db, link, 'Order');
+  const flat = (have) => Object.entries(have).filter(([, f]) => f.kind === 'SCALAR' || f.kind === 'ENUM').map(([n]) => n);
+  const parts = flat(order);
+  for (const name of ['customer', 'shipping_address', 'billing_address', 'items']) {
+    if (order[name]?.kind !== 'OBJECT') continue;
+    const inner = flat(await fieldsOf(db, link, order[name].type));
+    if (inner.length) parts.push(`${name} { ${inner.join(' ')} }`);
+  }
+  return parts.join(' ');
+}
+
+// Catch-up: reads the latest orders of the account and imports the ones the webhooks did not bring.
+export async function pullRecent(db, link, { first = 25 } = {}) {
+  const selection = await orderSelection(db, link);
+  const data = await graphql(db, link, `query($first: Int) { orders(query: "order_by:id order_dir:desc", first: $first) { edges { node { ${selection} } } } }`, { first });
+  const nodes = (data.orders?.edges || []).map((e) => e.node).reverse();
+  const result = { seen: nodes.length, imported: 0, errors: [] };
+  for (const node of nodes) {
+    try {
+      const r = await handleOrderEvent(db, link, 'created', node);
+      await recordEvent(db, link, 'pull', node, r.ignored ? 'ignored' : r.duplicate ? 'duplicate' : 'imported', null, r.order_id);
+      if (!r.ignored && !r.duplicate) result.imported++;
+    } catch (e) {
+      if (!(e instanceof HttpError)) throw e;
+      await recordEvent(db, link, 'pull', node, 'error', e.message);
+      result.errors.push(`${node.name || node._id || node.id}: ${e.message}`);
+    }
+  }
+  return result;
+}
+
 // After the user accepts: keep the tokens and ask LightFunnels to send the orders here.
 export async function connectLink(db, linkId, code, origin) {
   const t = await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(origin) });
