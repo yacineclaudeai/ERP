@@ -7,7 +7,7 @@ import {
 import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
 import {
-  STATUSES, HttpError, getOrder, createOrder, updateOrder, applyAction,
+  STATUSES, HttpError, getOrder, createOrder, updateOrder, applyAction, assignOrders,
   confirmAndDispatch, dispatchOrder, backToConfirmation, syncTracking, rerouteProductOrders, deleteOrder,
 } from '../services/orders.js';
 import { getStats, localDay, getConfirmationStats, getDeliveryStats } from '../services/stats.js';
@@ -178,8 +178,17 @@ export function apiRouter(db) {
   const allowedStatuses = (user) => [
     ...(can(user, 'confirm') ? CONFIRM_STATUSES : []), ...(can(user, 'tracking') ? TRACKING_STATUSES : []),
   ];
+  // A non-admin sees, at the confirmation stage, only the orders given to them.
+  const mineOnly = (user, alias = 'o') => (user.role === 'admin' ? null : {
+    sql: `(${alias}.status NOT IN (${CONFIRM_STATUSES.map(() => '?').join(',')}) OR ${alias}.assigned_to = ?)`,
+    args: [...CONFIRM_STATUSES, user.id],
+  });
   const checkOrderAccess = async (user, id) => {
-    if (!allowedStatuses(user).includes((await getOrder(db, id)).status)) throw new HttpError(403, 'ما عندكش الصلاحية على هاد الطلبية');
+    const order = await getOrder(db, id);
+    if (!allowedStatuses(user).includes(order.status)) throw new HttpError(403, 'ما عندكش الصلاحية على هاد الطلبية');
+    if (user.role !== 'admin' && CONFIRM_STATUSES.includes(order.status) && order.assigned_to !== user.id) {
+      throw new HttpError(403, 'هاد الطلبية ماشي تاعك');
+    }
   };
 
   r.get('/orders', ordersAccess, async (c) => {
@@ -190,6 +199,10 @@ export function apiRouter(db) {
     const asked = q.status ? String(q.status).split(',').filter((s) => STATUSES.includes(s)) : [];
     const list = (asked.length ? asked : allowed).filter((s) => allowed.includes(s));
     if (list.length < STATUSES.length) where.push(`o.status IN (${list.map(() => '?').join(',') || 'NULL'})`), args.push(...list);
+    const mine = mineOnly(c.get('user'));
+    if (mine) where.push(mine.sql), args.push(...mine.args);
+    if (q.assigned_to === 'none') where.push('o.assigned_to IS NULL');
+    else if (Number(q.assigned_to)) where.push('o.assigned_to = ?'), args.push(Number(q.assigned_to));
     if (Number(q.product_id)) where.push('o.product_id = ?'), args.push(Number(q.product_id));
     if (Number(q.store_id)) where.push('p.store_id = ?'), args.push(Number(q.store_id));
     if (Number(q.wilaya)) where.push('o.wilaya_code = ?'), args.push(Number(q.wilaya));
@@ -211,7 +224,8 @@ export function apiRouter(db) {
     const rows = await db.all(`
       SELECT o.*, p.name AS product_name, p.store_id, p.company_id AS product_company_id, s.name AS store_name, c.name AS company_name,
         (SELECT u.username FROM order_events e JOIN users u ON u.id = e.user_id
-          WHERE e.order_id = o.id AND e.type = 'confirmed' ORDER BY e.id DESC LIMIT 1) AS confirmed_by
+          WHERE e.order_id = o.id AND e.type = 'confirmed' ORDER BY e.id DESC LIMIT 1) AS confirmed_by,
+        (SELECT username FROM users WHERE id = o.assigned_to) AS assigned_name
       FROM orders o JOIN products p ON p.id = o.product_id
       LEFT JOIN stores s ON s.id = p.store_id
       LEFT JOIN delivery_companies c ON c.id = o.company_id
@@ -228,8 +242,27 @@ export function apiRouter(db) {
   // How many orders in each status, for the tabs of the orders pages.
   r.get('/orders/counts', ordersAccess, async (c) => {
     const allowed = allowedStatuses(c.get('user'));
-    const rows = await db.all('SELECT status, COUNT(*) AS n FROM orders GROUP BY status');
+    const mine = mineOnly(c.get('user'), 'orders');
+    const rows = await db.all(`SELECT status, COUNT(*) AS n FROM orders ${mine ? `WHERE ${mine.sql}` : ''} GROUP BY status`, ...(mine?.args || []));
     return c.json({ by_status: Object.fromEntries(rows.filter((x) => allowed.includes(x.status)).map((x) => [x.status, x.n])) });
+  });
+
+  // The admin gives orders to a confirmation agent (as_new: start them again as new orders).
+  r.post('/orders/assign', requireAdmin, async (c) => {
+    const b = body(c);
+    const ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter((n) => n > 0);
+    if (!ids.length) throw new HttpError(400, 'ما اخترت حتى طلبية');
+    return c.json(await assignOrders(db, ids, Number(b.user_id) || null, { asNew: Boolean(b.as_new), byUserId: c.get('user').id }));
+  });
+  r.get('/orders/agents', ordersAccess, async (c) => c.json({
+    agents: (await db.all("SELECT id, username, permissions FROM users WHERE role = 'agent' ORDER BY id"))
+      .filter((u) => parsePermissions(u.permissions).includes('confirm')).map((u) => ({ id: u.id, username: u.username })),
+    auto_transfer_after: Number(await getSetting(db, 'auto_transfer_after')) || 0,
+  }));
+  r.put('/orders/agents', requireAdmin, async (c) => {
+    const n = Math.max(0, Math.min(20, Math.floor(Number(body(c).auto_transfer_after)) || 0));
+    await setSetting(db, 'auto_transfer_after', String(n));
+    return c.json({ auto_transfer_after: n });
   });
 
   r.get('/orders/:id', ordersAccess, async (c) => {
@@ -241,7 +274,14 @@ export function apiRouter(db) {
     return c.json({ ...order, events });
   });
 
-  r.post('/orders', requirePerm('confirm'), async (c) => c.json(await createOrder(db, body(c), { source: 'manual', userId: c.get('user').id }), 201));
+  r.post('/orders', requirePerm('confirm'), async (c) => {
+    const user = c.get('user');
+    const order = await createOrder(db, body(c), { source: 'manual', userId: user.id });
+    // An agent's own manual order is theirs to confirm.
+    if (user.role !== 'admin') await db.run('UPDATE orders SET assigned_to = ? WHERE id = ?', user.id, order.id);
+    return c.json(await getOrder(db, order.id), 201);
+  });
+
 
   r.delete('/orders/:id', requireAdmin, async (c) => c.json(await deleteOrder(db, idParam(c))));
 

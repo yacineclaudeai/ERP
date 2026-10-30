@@ -229,12 +229,19 @@ export async function applyAction(db, id, action, { userId = null, note = null }
       t.run(`UPDATE orders SET status = ?, updated_at = now()${extra} WHERE id = ?`, status, id);
 
     switch (action) {
-      case 'no_answer':
+      case 'no_answer': {
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await t.run(`UPDATE orders SET status = 'no_answer', call_attempts = call_attempts + 1,
           updated_at = now() WHERE id = ?`, id);
         await logEvent(t, id, 'no_answer', note || `محاولة ${order.call_attempts + 1}`, userId);
+        // Failed too many times with this agent: the next agent gets it as a new order.
+        const limit = Number(await getSetting(t, 'auto_transfer_after')) || 0;
+        if (limit && order.assigned_to && order.call_attempts + 1 >= limit) {
+          const next = await nextAgent(t, order.assigned_to);
+          if (next) await transferOrder(t, order, next, `فاشلة ${order.call_attempts + 1} مرات`);
+        }
         break;
+      }
       case 'postpone':
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الحالة لا تسمح');
         await set('postponed');
@@ -285,6 +292,48 @@ export async function applyAction(db, id, action, { userId = null, note = null }
     }
     return getOrder(t, id);
   });
+}
+
+// Confirmation agents (non-admin accounts allowed to confirm), in a fixed order.
+async function confirmationAgents(db) {
+  return (await db.all("SELECT id, username, permissions FROM users WHERE role = 'agent' ORDER BY id"))
+    .filter((u) => String(u.permissions || '').split(',').includes('confirm'));
+}
+
+// The agent after this one, in turn; null when there is no other agent.
+async function nextAgent(db, currentId) {
+  const agents = (await confirmationAgents(db)).filter((u) => u.id !== currentId);
+  return agents.find((u) => u.id > currentId) || agents[0] || null;
+}
+
+// Gives the order to another agent as a new order: attempts start again.
+async function transferOrder(db, order, to, reason) {
+  const from = order.assigned_to && await db.get('SELECT username FROM users WHERE id = ?', order.assigned_to);
+  await db.run(`UPDATE orders SET assigned_to = ?, status = 'new', call_attempts = 0, updated_at = now() WHERE id = ?`, to.id, order.id);
+  await logEvent(db, order.id, 'transferred', `${reason}${from ? ` عند ${from.username}` : ''}، تحولت لـ ${to.username}`);
+}
+
+// The admin gives orders to an agent. asNew: also start them again as new
+// orders (for failed ones moving to another agent); only orders still at the
+// confirmation stage can start again.
+export async function assignOrders(db, ids, userId, { asNew = false, byUserId = null } = {}) {
+  const to = userId ? await db.get('SELECT id, username FROM users WHERE id = ?', userId) : null;
+  if (userId && !to) throw new HttpError(404, 'المستخدم غير موجود');
+  let done = 0;
+  await db.tx(async (t) => {
+    for (const id of ids) {
+      const order = await t.get('SELECT id, status, assigned_to FROM orders WHERE id = ? FOR UPDATE', id);
+      if (!order) continue;
+      if (asNew && to && OPEN.includes(order.status)) {
+        await transferOrder(t, order, to, 'حولها المدير');
+      } else {
+        await t.run('UPDATE orders SET assigned_to = ?, updated_at = now() WHERE id = ?', to?.id ?? null, id);
+        await logEvent(t, id, 'assigned', to ? `تعطات لـ ${to.username}` : 'نحات من المؤكدة', byUserId);
+      }
+      done += 1;
+    }
+  });
+  return { assigned: done };
 }
 
 // Sends a confirmed order to its store's delivery company.

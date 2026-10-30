@@ -227,6 +227,8 @@ test('a confirmation agent edits an order from the table, product included', asy
   const b = (await api('POST', '/api/products', { name: 'Parfum B', price: 3000, stock: 5 })).body;
   await api('POST', '/api/users', { username: 'agent1', password: 'agent123', role: 'agent', permissions: ['confirm', 'tracking'] });
   const o = (await api('POST', '/api/orders', { product_id: a.id, customer_name: 'Test', phone: '0550001122', wilaya_code: 16 })).body;
+  const agent = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'agent1');
+  await api('POST', '/api/orders/assign', { ids: [o.id], user_id: agent.id });
 
   await api('POST', '/api/auth/login', { username: 'agent1', password: 'agent123' });
   let r = await api('PUT', `/api/orders/${o.id}`, { product_id: b.id });
@@ -605,6 +607,7 @@ test('each account sees only the pages ticked for it', async () => {
   await api('POST', '/api/users', { username: 'compta', password: 'secret1', role: 'agent', permissions: ['accounting', 'stats'] });
   const users = (await api('GET', '/api/users')).body.users;
   assert.deepEqual(users.find((u) => u.username === 'conf').permissions, ['confirm']);
+  await api('POST', '/api/orders/assign', { ids: [o.id], user_id: users.find((u) => u.username === 'conf').id });
 
   const as = async (username) => api('POST', '/api/auth/login', { username, password: 'secret1' });
   await as('conf');
@@ -706,4 +709,53 @@ test('an accountant sees the profit of the stores ticked for them only', async (
   await api('POST', '/api/auth/login', { username: 'compta1', password: 'secret1' });
   assert.ok((await api('GET', '/api/accounting')).body.products.some((p) => p.id === p2.id), 'no store ticked = every store');
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+});
+
+test('orders are given to agents; failed twice, they go to the next agent as new', async () => {
+  const p = (await api('POST', '/api/products', { name: 'Assign item', price: 1000, stock: 5 })).body;
+  await api('POST', '/api/users', { username: 'sara', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  await api('POST', '/api/users', { username: 'amina', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  const users = (await api('GET', '/api/users')).body.users;
+  const sara = users.find((u) => u.username === 'sara');
+  const amina = users.find((u) => u.username === 'amina');
+  const mk = async (phone) => (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'A', phone, wilaya_code: 16 })).body;
+  const [o1, o2, o3] = [await mk('0551770201'), await mk('0551770202'), await mk('0551770203')];
+  assert.equal((await api('POST', '/api/orders/assign', { ids: [o1.id, o2.id], user_id: sara.id })).body.assigned, 2);
+  assert.equal((await api('GET', `/api/orders?assigned_to=${sara.id}`)).body.total, 2);
+  assert.ok((await api('GET', '/api/orders?assigned_to=none')).body.rows.some((x) => x.id === o3.id));
+  assert.equal((await api('GET', '/api/orders/agents')).body.auto_transfer_after, 2);
+
+  const as = (username) => api('POST', '/api/auth/login', { username, password: 'secret1' });
+  await as('sara');
+  let mine = (await api('GET', '/api/orders?status=new,no_answer,postponed')).body.rows.map((x) => x.id);
+  assert.deepEqual(mine.sort(), [o1.id, o2.id].sort(), 'an agent sees only her orders');
+  assert.equal((await api('GET', `/api/orders/${o3.id}`)).status, 403);
+  assert.equal((await api('POST', '/api/orders/assign', { ids: [o1.id], user_id: sara.id })).status, 403);
+
+  await api('POST', `/api/orders/${o1.id}/action`, { action: 'no_answer' });
+  let r = await api('GET', `/api/orders/${o1.id}`);
+  assert.equal(r.body.status, 'no_answer');
+  await api('POST', `/api/orders/${o1.id}/action`, { action: 'no_answer' });
+  assert.equal((await api('GET', `/api/orders/${o1.id}`)).status, 403, 'gone to the other agent');
+
+  await as('amina');
+  r = (await api('GET', `/api/orders/${o1.id}`)).body;
+  assert.equal(r.status, 'new');
+  assert.equal(r.call_attempts, 0);
+  assert.equal(r.assigned_to, amina.id);
+  assert.ok(r.events.some((e) => e.type === 'transferred'));
+
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const team = (await api('GET', '/api/stats/confirmation')).body.team;
+  assert.equal(team.find((t) => t.username === 'sara').failed, 1, 'still failed for sara');
+
+  // The admin moves a failed one by hand, as a new order.
+  await as('sara');
+  await api('POST', `/api/orders/${o2.id}/action`, { action: 'no_answer' });
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  await api('POST', '/api/orders/assign', { ids: [o2.id], user_id: amina.id, as_new: true });
+  r = (await api('GET', `/api/orders/${o2.id}`)).body;
+  assert.deepEqual([r.status, r.call_attempts, r.assigned_to], ['new', 0, amina.id]);
+  await api('PUT', '/api/orders/agents', { auto_transfer_after: 0 });
+  assert.equal((await api('GET', '/api/orders/agents')).body.auto_transfer_after, 0);
 });

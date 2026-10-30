@@ -8,6 +8,7 @@ const EVENT_LABELS = {
   created: 'تسجلت', duplicate: 'مكررة؟', no_answer: 'ما ردش', postponed: 'تأجلت', confirmed: 'تأكدت',
   cancelled: 'تلغات', reopened: 'تعاودت تفتحت', dispatched: 'تبعثت للتوصيل', dispatch_failed: 'فشل الإرسال',
   delivered: 'تستلمت', returned: 'روتور', return_received: 'الروتور وصل', edited: 'تعدلت',
+  assigned: 'تعطات لمؤكدة', transferred: 'تحولت لمؤكدة أخرى',
 };
 const SOURCE_LABELS = { landing: 'صفحة الهبوط', sheet: 'شيت', abandoned: 'متروكة', manual: 'يدوي' };
 const SOURCE_ICONS = { landing: '🌐', sheet: '📗', abandoned: '🛒', manual: '✍️' };
@@ -418,7 +419,7 @@ async function statsPage() {
 
 // ---------- orders ----------
 const PAGE_SIZE = 50;
-const ORDER_FILTERS = ['status', 'q', 'product_id', 'store_id', 'wilaya', 'company_id', 'source', 'stop_desk', 'page'];
+const ORDER_FILTERS = ['status', 'q', 'product_id', 'store_id', 'wilaya', 'company_id', 'source', 'stop_desk', 'assigned_to', 'page'];
 
 // Two pages on the same table: confirmation (orders still to call) and
 // tracking (confirmed orders, at the delivery company, delivered, returned).
@@ -436,12 +437,15 @@ async function ordersPage(mode = 'confirm') {
   if (!params.has('status') || !f.status) f.status = P.first;
   const page = Math.max(1, Number(f.page) || 1);
   const query = Object.fromEntries(Object.entries({ ...f, page: '' }).filter(([, v]) => v !== ''));
-  const [list, products, stats, stores, companies] = await Promise.all([
+  // The admin gives confirmation orders to agents.
+  const assigning = mode === 'confirm' && isAdminUser();
+  const [list, products, stats, stores, companies, team] = await Promise.all([
     api('GET', `/orders?${new URLSearchParams({ ...query, status: f.status, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE })}`),
     api('GET', '/products'),
     api('GET', '/orders/counts'),
     api('GET', '/stores'),
     api('GET', '/delivery/companies'),
+    assigning ? api('GET', '/orders/agents') : null,
   ]);
   const tabs = mode === 'confirm'
     ? [[P.first, 'للتأكيد', P.first.split(',')], ...P.statuses.map((k) => [k, STATUS_LABELS[k], [k]]), [P.statuses.join(','), 'الكل', P.statuses]]
@@ -473,7 +477,16 @@ async function ordersPage(mode = 'confirm') {
       <select id="bulk-action"><option value="">تبديل الحالة للمحددين…</option>
         <option value="confirm">مؤكدة</option><option value="no_answer">ما ردش</option>
         <option value="postpone">مؤجلة</option><option value="cancel">ملغاة</option></select>
-      <button class="btn small" id="bulk-go">تطبيق</button></div>
+      <button class="btn small" id="bulk-go">تطبيق</button>
+      ${assigning ? `<span class="bulk-sep"></span>
+      <select id="assign-to"><option value="">عطيهم لـ…</option>
+        ${team.agents.map((u) => `<option value="${u.id}">${esc(u.username)}</option>`).join('')}<option value="0">— نحيهم من المؤكدة</option></select>
+      <label class="check"><input type="checkbox" id="assign-new"> كطلبيات جديدة (المحاولات ترجع 0)</label>
+      <button class="btn small primary" id="assign-go">عطيهم</button>` : ''}</div>
+    ${assigning ? `<div class="bar muted">
+      <label class="check">الفاشلة تتحول وحدها للمؤكدة الأخرى بعد
+        <input id="auto-transfer" type="number" min="0" max="20" value="${team.auto_transfer_after}" style="width:60px"> مرات "ما ردش" (0 = لا)</label>
+      ${team.agents.length ? '' : '<span class="neg">مازال ما زدت حتى مؤكدة (صفحة المستخدمين)</span>'}</div>` : ''}
     <div class="top-scroll" id="top-scroll"><div></div></div>
     <div class="table-wrap orders-wrap" id="orders-wrap"><table class="orders">
       <thead><tr>
@@ -489,6 +502,7 @@ async function ordersPage(mode = 'confirm') {
         ${hfilter('المنتج', 'product_id', products.map((p) => [p.id, p.name]))}
         <th>سعر المنتج</th><th>الكمية</th><th>سعر التوصيل</th><th>السعر الكلي</th><th>التفاصيل</th>
         ${hfilter('شركة التوصيل', 'company_id', companies.map((c) => [c.id, c.name]))}
+        ${assigning ? hfilter('المؤكدة', 'assigned_to', [['none', 'بلا مؤكدة'], ...team.agents.map((u) => [u.id, u.username])]) : ''}
         <th>التأكيد بواسطة</th><th>الإجراءات</th>
       </tr></thead>
       <tbody>${list.rows.map((o) => orderRow(o, products, companies, stores)).join('')
@@ -534,6 +548,20 @@ async function ordersPage(mode = 'confirm') {
     refreshBulk();
   };
   main.querySelector('table.orders').addEventListener('change', (e) => e.target.matches('[data-check]') && refreshBulk());
+  if (assigning) {
+    main.querySelector('#assign-go').onclick = guard(async () => {
+      const to = main.querySelector('#assign-to').value;
+      const ids = checked();
+      if (to === '' || !ids.length) return toast('اختار المؤكدة', true);
+      const r = await api('POST', '/orders/assign', { ids, user_id: Number(to) || null, as_new: main.querySelector('#assign-new').checked });
+      toast(`تعطاو ${r.assigned} طلبية`);
+      router();
+    });
+    main.querySelector('#auto-transfer').onchange = guard(async (e) => {
+      await api('PUT', '/orders/agents', { auto_transfer_after: e.target.value });
+      toast('تم الحفظ');
+    });
+  }
   main.querySelector('#bulk-go').onclick = guard(async () => {
     const action = main.querySelector('#bulk-action').value;
     const ids = checked();
@@ -614,6 +642,8 @@ function statusCell(o) {
 
 function orderRow(o, products, companies, stores) {
   const edit = EDITABLE.includes(o.status);
+  // The agent column is shown to admins on the confirmation page.
+  const showAgent = isAdminUser() && location.hash.split('?')[0] === '#/orders';
   const text = (field, value, attrs = '') => (edit
     ? `<input class="cell" data-field="${field}" value="${esc(value ?? '')}" ${attrs}>`
     : `<span>${esc(value ?? '')}</span>`);
@@ -656,6 +686,7 @@ function orderRow(o, products, companies, stores) {
       : esc(o.notes || '')}</td>
     <td>${edit ? pick('company_id', companies.map((c) => [c.id, c.name]), o.company_id, '— بلا شركة', o.company_id ? '' : 'missing') : esc(o.company_name || '')}
       ${o.tracking ? `<div class="muted" dir="ltr">${esc(o.tracking)}</div>` : ''}</td>
+    ${showAgent ? `<td>${o.assigned_name ? `<b>${esc(o.assigned_name)}</b>` : '<span class="muted">—</span>'}</td>` : ''}
     <td class="muted">${esc(o.confirmed_by || '')}</td>
     <td class="acts nowrap">
       ${isAdminUser() && !['dispatched', 'delivered', 'returned'].includes(o.status) ? `<button data-delete title="حذف">${icon('trash', 'red')}</button>` : ''}
