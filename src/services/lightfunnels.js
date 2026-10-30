@@ -183,7 +183,8 @@ export function nodeToOrder(node) {
   const phone = sheetPhone(pick(node, 'shipping_address.phone', 'customer.phone', 'billing_address.phone', 'phone'));
   if (!phone) throw new HttpError(400, `رقم غير صحيح "${pick(node, 'shipping_address.phone', 'customer.phone') ?? ''}"`);
   const stateRaw = pick(node, 'shipping_address.state', 'shipping_address.province', 'shipping_address.state_code', 'shipping_address.region');
-  const wilaya = parseWilaya(stateRaw);
+  // Some landing pages put the wilaya in the city field and leave the state empty.
+  const wilaya = parseWilaya(stateRaw) || parseWilaya(pick(node, 'shipping_address.city'));
   if (!wilaya) throw new HttpError(400, `ولاية غير معروفة "${stateRaw ?? ''}"`);
   const items = ([node.items, node.line_items, node.lines, node.products].find(Array.isArray) || []).map((i) => ({
     title: text(pick(i, 'title', 'name', 'product.title')),
