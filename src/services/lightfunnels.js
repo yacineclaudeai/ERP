@@ -172,6 +172,12 @@ const num = (v) => {
 };
 const text = (v) => (v == null ? null : String(v).trim() || null);
 
+// LightFunnels variant titles repeat the product name ("Pyjama Taille :XL/42"): keep only "Taille :XL/42".
+function variantOnly(title, variant) {
+  if (!variant || variant === title) return null;
+  return title && variant.startsWith(title) ? variant.slice(title.length).trim() || null : variant;
+}
+
 // A LightFunnels order (the webhook's "node") to what the ERP needs. Field names are tried in
 // several spellings, because the payload is only partly documented. Throws with the reason.
 export function nodeToOrder(node) {
@@ -191,7 +197,7 @@ export function nodeToOrder(node) {
     sku: text(pick(i, 'sku', 'variant.sku')),
     quantity: Math.max(1, Math.floor(num(pick(i, 'quantity', 'qty')) ?? 1)),
     price: num(pick(i, 'price', 'unit_price')),
-    variant: text(pick(i, 'variant_title', 'variant.title', 'variant_name')),
+    variant: variantOnly(text(pick(i, 'title', 'name', 'product.title')), text(pick(i, 'variant_title', 'variant.title', 'variant_name'))),
   })).filter((i) => i.title || i.sku).reduce((acc, i) => {
     const same = acc.find((x) => x.title === i.title && x.sku === i.sku && x.price === i.price && x.variant === i.variant);
     if (same) same.quantity += i.quantity; else acc.push(i);
@@ -208,7 +214,8 @@ export function nodeToOrder(node) {
     stop_desk: /desk|bureau|stop|agence|office|مكتب/i.test(method),
     delivery_fee: num(pick(node, 'shipping', 'shipping_price', 'shipping_total')),
     total: num(node.total),
-    notes: [text(node.notes), ...items.map((i) => i.variant)].filter(Boolean).join(' | ') || null,
+    variant: items[0].variant,
+    notes: [text(node.notes), ...items.slice(1).map((i) => i.variant && `${i.title}: ${i.variant}`)].filter(Boolean).join(' | ') || null,
     created_at: text(pick(node, 'created_at', 'date')),
     items,
   };
@@ -235,7 +242,7 @@ export async function handleOrderEvent(db, link, topic, node) {
       product_id: main.product_id, quantity: main.quantity, unit_price: main.unit_price,
       customer_name: parsed.customer_name, phone: parsed.phone, wilaya_code: parsed.wilaya_code, commune: parsed.commune,
       address: parsed.address, stop_desk: parsed.stop_desk, delivery_fee: parsed.delivery_fee, total: parsed.total,
-      notes: parsed.notes, items: rest,
+      notes: parsed.notes, variant: parsed.variant, items: rest,
     }, { source: 'lightfunnels' });
     await db.run('UPDATE lightfunnels_orders SET order_id = ? WHERE link_id = ? AND lf_order_id = ?', order.id, link.id, lfId);
     await dropAbandonedCopies(db, parsed.phone, order.id);
@@ -281,7 +288,7 @@ export async function handleCheckoutEvent(db, link, node) {
       product_id: main.product_id, quantity: main.quantity, unit_price: main.unit_price,
       customer_name: parsed.customer_name, phone: parsed.phone, wilaya_code: parsed.wilaya_code, commune: parsed.commune,
       address: parsed.address, stop_desk: parsed.stop_desk, delivery_fee: parsed.delivery_fee, total: parsed.total,
-      notes: parsed.notes, items: rest,
+      notes: parsed.notes, variant: parsed.variant, items: rest,
     }, { source: 'abandoned' });
     await db.run('UPDATE lightfunnels_orders SET order_id = ? WHERE link_id = ? AND lf_order_id = ?', order.id, link.id, lfId);
     return { order_id: order.id, node };

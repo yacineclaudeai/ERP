@@ -128,6 +128,7 @@ function validateOrderFields(input) {
     address: input.address ? String(input.address).trim() : null,
     stop_desk: Boolean(input.stop_desk),
     notes: input.notes ? String(input.notes).trim() : null,
+    variant: input.variant ? String(input.variant).trim() : null,
   };
 }
 
@@ -156,12 +157,12 @@ export async function createOrder(db, input, { source = 'manual', userId = null,
     const { rows: [{ id }] } = await t.run(`
       INSERT INTO orders (product_id, quantity, unit_price, delivery_fee, total, customer_name, phone, phone2,
         wilaya_code, commune, address, stop_desk, notes, source, landing_url, utm_source, utm_campaign,
-        duplicate_of, company_id, status, sheet_source_id, external_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        duplicate_of, company_id, status, sheet_source_id, external_id, variant)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       product.id, f.quantity, unit_price, delivery_fee, total, f.customer_name, f.phone, f.phone2,
       f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes, source,
       input.landing_url ?? null, input.utm_source ?? null, input.utm_campaign ?? null,
-      dup?.id ?? null, route.company_id, status, sheet?.source_id ?? null, sheet?.external_id ?? null,
+      dup?.id ?? null, route.company_id, status, sheet?.source_id ?? null, sheet?.external_id ?? null, f.variant,
     );
     await t.run('UPDATE orders SET reference = ? WHERE id = ?', `CMD-${String(id).padStart(6, '0')}`, id);
     await saveItems(t, id, items);
@@ -209,10 +210,10 @@ export async function updateOrder(db, id, input, userId = null) {
     }
     await t.run(`
       UPDATE orders SET product_id = ?, customer_name = ?, phone = ?, phone2 = ?, wilaya_code = ?, commune = ?, address = ?,
-        stop_desk = ?, notes = ?, quantity = ?, unit_price = ?, delivery_fee = ?, total = ?, company_id = ?,
+        stop_desk = ?, notes = ?, variant = ?, quantity = ?, unit_price = ?, delivery_fee = ?, total = ?, company_id = ?,
         updated_at = now()
       WHERE id = ?`,
-      product ? product.id : order.product_id, f.customer_name, f.phone, f.phone2, f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes,
+      product ? product.id : order.product_id, f.customer_name, f.phone, f.phone2, f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes, f.variant,
       f.quantity, unit_price, delivery_fee, unit_price * f.quantity + itemsTotal(items) + delivery_fee, company_id, id,
     );
     await logEvent(t, id, 'edited', product ? `المنتج: ${product.name}` : null, userId);

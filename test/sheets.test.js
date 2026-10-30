@@ -191,6 +191,6 @@ test('abandoned checkouts: go to confirmation, same "Order ID" text on every row
   assert.equal(rows[0].source, 'abandoned');
   assert.equal(rows[0].wilaya_code, 26);
   assert.equal(rows[0].phone, '0770202020');
-  assert.equal(rows[0].notes, 'Pyjama 4 pcs taille:M/38');
+  assert.equal(rows[0].variant, 'Pyjama 4 pcs taille:M/38');
   assert.equal(new Date(rows[0].created_at).toISOString(), '2026-06-26T19:07:00.000Z');
 });
