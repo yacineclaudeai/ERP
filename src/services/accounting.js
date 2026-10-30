@@ -108,15 +108,16 @@ export async function getAccounting(db) {
     SELECT p.id, p.name, p.cost, p.stock, p.store_id, s.name AS store_name,
       COALESCE(SUM(o.unit_price * o.quantity) FILTER (WHERE o.status = 'delivered'), 0) AS revenue,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'delivered'), 0) AS delivered_qty,
-      COUNT(o.id) FILTER (WHERE o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed_orders,
-      COUNT(o.id) FILTER (WHERE o.status IN ('dispatched','delivered','returned')) AS parcels,
+      -- An order with several products is confirmed, packed and sent once: counted on its first product.
+      COUNT(o.order_id) FILTER (WHERE o.is_main AND o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed_orders,
+      COUNT(o.order_id) FILTER (WHERE o.is_main AND o.status IN ('dispatched','delivered','returned')) AS parcels,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.stock_reserved), 0) AS out_qty,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'confirmed' AND o.stock_reserved), 0) AS reserved_qty,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'returned' AND o.return_received_at IS NULL AND o.stock_reserved), 0) AS returning_qty,
       COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'returned' AND o.return_received_at IS NOT NULL), 0) AS returned_back_qty,
       (SELECT COALESCE(SUM(amount), 0) FROM ad_spend a WHERE a.product_id = p.id) AS ads_dzd
     FROM products p LEFT JOIN stores s ON s.id = p.store_id
-    LEFT JOIN orders o ON o.product_id = p.id AND o.status <> 'fake'
+    LEFT JOIN order_lines o ON o.product_id = p.id AND o.status <> 'fake'
     GROUP BY p.id, s.name ORDER BY p.id`);
   const costs = new Map((await db.all('SELECT * FROM product_costs')).map((c) => [c.product_id, c]));
   const expenses = await db.all('SELECT id, product_id, name, amount FROM product_expenses ORDER BY id');
@@ -126,7 +127,7 @@ export async function getAccounting(db) {
   for (const x of purchases) (purchasesOf.get(x.product_id) || purchasesOf.set(x.product_id, []).get(x.product_id)).push(x);
   // Parcels at the delivery company, split by what the company last said about them.
   const shipping = new Map();
-  for (const o of await db.all("SELECT product_id, quantity, delivery_status FROM orders WHERE status = 'dispatched'")) {
+  for (const o of await db.all("SELECT product_id, quantity, delivery_status FROM order_lines WHERE status = 'dispatched'")) {
     const s = shipping.get(o.product_id) || shipping.set(o.product_id, { at_company: 0, out_for_delivery: 0 }).get(o.product_id);
     s[OUT_FOR_DELIVERY.test(o.delivery_status || '') ? 'out_for_delivery' : 'at_company'] += o.quantity;
   }

@@ -25,16 +25,16 @@ export async function getStats(db, { from = null, to = null } = {}) {
 
   const products = await db.all(`
     SELECT p.id, p.name, p.stock, p.cost, p.store_id, s.name AS store_name,
-      COUNT(o.id) FILTER (WHERE o.status <> 'fake') AS orders,
-      COUNT(o.id) FILTER (WHERE o.status = 'fake') AS fake,
-      COUNT(o.id) FILTER (WHERE o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed,
-      COUNT(o.id) FILTER (WHERE o.status = 'cancelled') AS cancelled,
-      COUNT(o.id) FILTER (WHERE o.status = 'delivered') AS delivered,
-      COUNT(o.id) FILTER (WHERE o.status = 'returned') AS returned,
+      COUNT(o.order_id) FILTER (WHERE o.status <> 'fake') AS orders,
+      COUNT(o.order_id) FILTER (WHERE o.status = 'fake') AS fake,
+      COUNT(o.order_id) FILTER (WHERE o.status IN ('confirmed','dispatched','delivered','returned')) AS confirmed,
+      COUNT(o.order_id) FILTER (WHERE o.status = 'cancelled') AS cancelled,
+      COUNT(o.order_id) FILTER (WHERE o.status = 'delivered') AS delivered,
+      COUNT(o.order_id) FILTER (WHERE o.status = 'returned') AS returned,
       SUM(CASE WHEN o.status = 'delivered' THEN o.unit_price * o.quantity ELSE 0 END) AS revenue,
       SUM(CASE WHEN o.status = 'delivered' THEN p.cost * o.quantity ELSE 0 END) AS cogs
     FROM products p LEFT JOIN stores s ON s.id = p.store_id
-    LEFT JOIN orders o ON o.product_id = p.id AND ${r.sql}
+    LEFT JOIN order_lines o ON o.product_id = p.id AND ${r.sql}
     GROUP BY p.id, s.name ORDER BY orders DESC, p.id`, ...r.args);
 
   const ads = range('date', from, to);

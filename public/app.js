@@ -646,7 +646,7 @@ function orderRow(o, products, companies, stores) {
     <td>${text('commune', o.commune, 'style="width:110px"')}</td>
     <td>${edit && !o.stock_reserved
       ? pick('product_id', products.filter((p) => p.active || p.id === o.product_id).map((p) => [p.id, p.name]), o.product_id, '', 'p')
-      : esc(o.product_name)}</td>
+      : esc(o.product_name)}${o.items?.length ? `<div class="extra-items" title="${esc(o.items.map((i) => `${i.product_name} × ${i.quantity}`).join('، '))}">+ ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : ''}</td>
     <td class="num">${num('unit_price', o.unit_price)}</td>
     <td class="num">${edit ? `<input class="cell num" data-field="quantity" value="${o.quantity}" type="number" min="1" style="width:44px">` : o.quantity}</td>
     <td class="num">${num('delivery_fee', o.delivery_fee, 56)}</td>
@@ -768,7 +768,7 @@ async function openOrder(id) {
       <div><div class="muted">الهاتف</div><a href="tel:${esc(o.phone)}" dir="ltr">${esc(o.phone)}</a> <a href="${whatsapp(o.phone)}" target="_blank" rel="noopener">💬 WhatsApp</a>${o.phone2 ? ` / <a href="tel:${esc(o.phone2)}" dir="ltr">${esc(o.phone2)}</a>` : ''}</div>
       <div><div class="muted">الولاية / البلدية</div>${wilaya(o.wilaya_code)} / ${esc(o.commune || '—')}</div>
       <div><div class="muted">العنوان</div>${esc(o.address || '—')} ${o.stop_desk ? '<span class="badge">مكتب</span>' : ''}</div>
-      <div><div class="muted">المنتج</div>${esc(o.product_name)} × ${o.quantity}${o.store_name ? ` <span class="muted">(${esc(o.store_name)})</span>` : ''}</div>
+      <div><div class="muted">${o.items?.length ? 'المنتجات' : 'المنتج'}</div>${esc(o.product_name)} × ${o.quantity}${o.items?.map((i) => `<br>${esc(i.product_name)} × ${i.quantity} <span class="muted">(${money(i.unit_price)})</span>`).join('') || ''}${o.store_name ? ` <span class="muted">(${esc(o.store_name)})</span>` : ''}</div>
       <div><div class="muted">المجموع</div>${money(o.unit_price * o.quantity)} + توصيل ${money(o.delivery_fee)} = <b>${money(o.total)}</b></div>
       <div><div class="muted">شركة التوصيل</div>${esc(o.company_name || 'غير محددة')} ${esc(o.tracking || '')}</div>
       <div><div class="muted">المصدر</div>${SOURCE_LABELS[o.source] || o.source} ${o.utm_campaign ? `· ${esc(o.utm_campaign)}` : ''}</div>
@@ -830,11 +830,18 @@ async function openOrder(id) {
 async function orderForm(order, products) {
   const companies = await api('GET', '/delivery/companies');
   const o = order || { quantity: 1, wilaya_code: 16, stop_desk: 0 };
+  const productOptions = (selected) => products.filter((p) => p.active || p.id === selected)
+    .map((p) => `<option value="${p.id}" data-price="${p.price}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)} — ${money(p.price)}</option>`).join('');
+  // One more product of the same parcel: product, quantity, unit price.
+  const itemRow = (i = {}) => `<div class="grid3 item-row">
+    <label>المنتج<select data-item="product_id">${productOptions(i.product_id)}</select></label>
+    <label>الكمية<input data-item="quantity" type="number" min="1" value="${i.quantity || 1}"></label>
+    <div class="actions" style="align-self:end"><label style="flex:1">سعر الوحدة<input data-item="unit_price" type="number" value="${i.unit_price ?? ''}" placeholder="سعر المنتج"></label>
+      <button class="btn small danger" type="button" data-remove-item>✕</button></div></div>`;
   const box = modal.open(`
     <h3>${order ? `تعديل ${esc(order.reference)}` : 'طلبية جديدة'}</h3>
     <form class="stack" id="order-form">
-      ${order?.stock_reserved ? '' : `<label>المنتج<select name="product_id" required>${products.filter((p) => p.active || p.id === o.product_id)
-        .map((p) => `<option value="${p.id}" ${p.id === o.product_id ? 'selected' : ''}>${esc(p.name)} — ${money(p.price)}</option>`).join('')}</select></label>`}
+      ${order?.stock_reserved ? '' : `<label>المنتج<select name="product_id" required>${productOptions(o.product_id)}</select></label>`}
       <div class="grid2">
         <label>الاسم<input name="customer_name" value="${esc(o.customer_name)}" required></label>
         <label>الهاتف<input name="phone" value="${esc(o.phone)}" required dir="ltr"></label>
@@ -848,15 +855,47 @@ async function orderForm(order, products) {
         <label>شركة التوصيل<select name="company_id"><option value="">حسب الولاية</option>
           ${companies.map((c) => `<option value="${c.id}" ${c.id === o.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>` : ''}
       </div>
+      ${order?.stock_reserved ? (o.items?.length ? `<div class="muted">منتجات أخرى: ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : '') : `
+      <div class="stack" id="extra-items">
+        <div class="muted">منتجات أخرى في نفس الطرد</div>
+        ${(o.items || []).map(itemRow).join('')}
+      </div>
+      <div><button class="btn small" type="button" id="add-item">+ منتج آخر</button></div>`}
+      <div class="muted" id="order-total"></div>
       <label class="check"><input type="checkbox" name="stop_desk" ${o.stop_desk ? 'checked' : ''}> استلام من المكتب (Stop desk)</label>
       <label>ملاحظة<textarea name="notes">${esc(o.notes)}</textarea></label>
       <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إلغاء</button></div>
     </form>`);
-  box.querySelector('#order-form').onsubmit = guard(async (e) => {
+  const form = box.querySelector('#order-form');
+  const extra = form.querySelector('#extra-items');
+  const priceOf = (select) => Number(select.selectedOptions[0]?.dataset.price || 0);
+  const readItems = () => [...form.querySelectorAll('.item-row')].map((row) => {
+    const get = (k) => row.querySelector(`[data-item="${k}"]`);
+    return { product_id: Number(get('product_id').value), quantity: Number(get('quantity').value) || 1, unit_price: get('unit_price').value };
+  });
+  // Products total shown while typing; the delivery fee is added by the server.
+  const showTotal = () => {
+    const main = form.elements.product_id;
+    const mainPrice = form.elements.unit_price.value !== '' ? Number(form.elements.unit_price.value) : main ? priceOf(main) : o.unit_price;
+    const lines = (Number(form.elements.quantity.value) || 1) * mainPrice + [...form.querySelectorAll('.item-row')].reduce((a, row) => {
+      const price = row.querySelector('[data-item=unit_price]').value;
+      return a + (Number(row.querySelector('[data-item=quantity]').value) || 1) * (price !== '' ? Number(price) : priceOf(row.querySelector('[data-item=product_id]')));
+    }, 0);
+    form.querySelector('#order-total').textContent = `مجموع المنتجات: ${money(lines)} (+ سعر التوصيل)`;
+  };
+  form.addEventListener('input', showTotal);
+  form.addEventListener('change', showTotal);
+  if (extra) {
+    form.querySelector('#add-item').onclick = () => { extra.insertAdjacentHTML('beforeend', itemRow()); showTotal(); };
+    extra.addEventListener('click', (e) => { if (e.target.closest('[data-remove-item]')) { e.target.closest('.item-row').remove(); showTotal(); } });
+  }
+  showTotal();
+  form.onsubmit = guard(async (e) => {
     e.preventDefault();
     const f = formData(e.target);
     f.stop_desk = Boolean(f.stop_desk);
     if (f.unit_price === '') delete f.unit_price;
+    if (extra) f.items = readItems();
     if (order) {
       if (f.company_id === '') f.company_id = null;
       // New product without a hand-typed price: take the new product's price.

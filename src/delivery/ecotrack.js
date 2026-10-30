@@ -56,7 +56,8 @@ export const ecotrack = {
       commune: order.commune || '',
       code_wilaya: order.wilaya_code,
       montant: order.total,
-      produit: `${product.name} x${order.quantity}`,
+      // One parcel, every product of the order.
+      produit: [`${product.name} x${order.quantity}`, ...(order.items || []).map((i) => `${i.product_name} x${i.quantity}`)].join(' + '),
       remarque: order.notes || '',
       type: 1, // 1 = livraison
       stop_desk: order.stop_desk ? 1 : 0,

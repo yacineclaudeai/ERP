@@ -217,6 +217,11 @@ export function apiRouter(db) {
       LEFT JOIN delivery_companies c ON c.id = o.company_id
       ${whereSql} ORDER BY o.id DESC LIMIT ? OFFSET ?`, ...args, limit, offset);
     const { total } = await db.get(`SELECT COUNT(*) AS total FROM orders o JOIN products p ON p.id = o.product_id ${whereSql}`, ...args);
+    // The extra products of these orders.
+    const items = rows.length ? await db.all(`SELECT i.order_id, i.product_id, i.quantity, i.unit_price, p.name AS product_name
+      FROM order_items i JOIN products p ON p.id = i.product_id
+      WHERE i.order_id IN (${rows.map(() => '?').join(',')}) ORDER BY i.id`, ...rows.map((o) => o.id)) : [];
+    for (const o of rows) o.items = items.filter((i) => i.order_id === o.id);
     return c.json({ rows, total });
   });
 

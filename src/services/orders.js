@@ -63,6 +63,36 @@ async function moveStock(db, productId, orderId, quantity, reason) {
     productId, orderId, quantity, reason);
 }
 
+// Stock moves for every product of the order: its own product and the extra ones.
+async function moveOrderStock(db, order, sign, reason, orderId = order.id) {
+  await moveStock(db, order.product_id, orderId, sign * order.quantity, reason);
+  for (const item of order.items) await moveStock(db, item.product_id, orderId, sign * item.quantity, reason);
+}
+
+// Extra products of an order, checked: [{ product_id, quantity, unit_price }].
+async function readItems(db, list, trusted) {
+  if (!Array.isArray(list)) return [];
+  const items = [];
+  for (const raw of list) {
+    const product = await db.get('SELECT * FROM products WHERE id = ?', Number(raw?.product_id) || 0);
+    if (!product) throw new HttpError(404, 'المنتج غير موجود');
+    const quantity = Math.max(1, Math.floor(Number(raw.quantity ?? 1)) || 1);
+    const unit_price = trusted && raw.unit_price != null && raw.unit_price !== '' ? Number(raw.unit_price) : product.price;
+    if (!Number.isFinite(unit_price) || unit_price < 0) throw new HttpError(400, 'السعر غير صحيح');
+    items.push({ product_id: product.id, quantity, unit_price });
+  }
+  return items;
+}
+
+const itemsTotal = (items) => items.reduce((a, i) => a + i.unit_price * i.quantity, 0);
+
+async function saveItems(db, orderId, items) {
+  await db.run('DELETE FROM order_items WHERE order_id = ?', orderId);
+  for (const i of items) {
+    await db.run('INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)', orderId, i.product_id, i.quantity, i.unit_price);
+  }
+}
+
 // lock = true takes a row lock on the order, for read-then-write inside a transaction.
 export async function getOrder(db, id, { lock = false } = {}) {
   const order = await db.get(`
@@ -73,6 +103,8 @@ export async function getOrder(db, id, { lock = false } = {}) {
     LEFT JOIN delivery_companies c ON c.id = o.company_id
     WHERE o.id = ?${lock ? ' FOR UPDATE OF o' : ''}`, id);
   if (!order) throw new HttpError(404, 'Commande introuvable');
+  order.items = await db.all(`SELECT i.id, i.product_id, i.quantity, i.unit_price, p.name AS product_name
+    FROM order_items i JOIN products p ON p.id = i.product_id WHERE i.order_id = ? ORDER BY i.id`, id);
   return order;
 }
 
@@ -111,7 +143,8 @@ export async function createOrder(db, input, { source = 'manual', userId = null,
   const trusted = source !== 'landing';
   const unit_price = input.unit_price != null && trusted ? Number(input.unit_price) : product.price;
   const delivery_fee = input.delivery_fee != null && trusted ? Number(input.delivery_fee) : f.stop_desk ? route.desk_fee : route.home_fee;
-  const total = input.total != null && trusted ? Number(input.total) : unit_price * f.quantity + delivery_fee;
+  const items = await readItems(db, input.items, trusted);
+  const total = input.total != null && trusted ? Number(input.total) : unit_price * f.quantity + itemsTotal(items) + delivery_fee;
   const status = sheet && input.status === 'fake' ? 'fake' : 'new';
 
   return db.tx(async (t) => {
@@ -131,6 +164,7 @@ export async function createOrder(db, input, { source = 'manual', userId = null,
       dup?.id ?? null, route.company_id, status, sheet?.source_id ?? null, sheet?.external_id ?? null,
     );
     await t.run('UPDATE orders SET reference = ? WHERE id = ?', `CMD-${String(id).padStart(6, '0')}`, id);
+    await saveItems(t, id, items);
     const origin = sheet ? `من الشيت ${sheet.name}` : source === 'landing' ? 'من صفحة الهبوط' : 'يدوياً';
     await logEvent(t, id, 'created', origin, userId);
     if (dup) await logEvent(t, id, 'duplicate', `طلبية مكررة محتملة (#${dup.id})`);
@@ -166,13 +200,20 @@ export async function updateOrder(db, id, input, userId = null) {
     if (order.stock_reserved && f.quantity !== order.quantity) {
       await moveStock(t, order.product_id, id, order.quantity - f.quantity, 'تعديل الكمية');
     }
+    // The extra products can change only while no stock is held, like the main one.
+    let items = order.items;
+    if (input.items !== undefined) {
+      if (order.stock_reserved) throw new HttpError(409, 'لا يمكن تبديل المنتجات بعد التأكيد، ألغي الطلبية وعاود');
+      items = await readItems(t, input.items, true);
+      await saveItems(t, id, items);
+    }
     await t.run(`
       UPDATE orders SET product_id = ?, customer_name = ?, phone = ?, phone2 = ?, wilaya_code = ?, commune = ?, address = ?,
         stop_desk = ?, notes = ?, quantity = ?, unit_price = ?, delivery_fee = ?, total = ?, company_id = ?,
         updated_at = now()
       WHERE id = ?`,
       product ? product.id : order.product_id, f.customer_name, f.phone, f.phone2, f.wilaya_code, f.commune, f.address, f.stop_desk, f.notes,
-      f.quantity, unit_price, delivery_fee, unit_price * f.quantity + delivery_fee, company_id, id,
+      f.quantity, unit_price, delivery_fee, unit_price * f.quantity + itemsTotal(items) + delivery_fee, company_id, id,
     );
     await logEvent(t, id, 'edited', product ? `المنتج: ${product.name}` : null, userId);
     return getOrder(t, id);
@@ -201,13 +242,13 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         break;
       case 'confirm':
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الطلبية مؤكدة أو مغلقة من قبل');
-        await moveStock(t, order.product_id, id, -order.quantity, 'تأكيد طلبية');
+        await moveOrderStock(t, order, -1, 'تأكيد طلبية');
         await set('confirmed', ', stock_reserved = true, confirmed_at = now(), dispatch_error = NULL');
         await logEvent(t, id, 'confirmed', note, userId);
         break;
       case 'cancel':
         if (![...OPEN, 'confirmed'].includes(order.status)) throw new HttpError(409, 'لا يمكن إلغاء طلبية مرسلة');
-        if (order.stock_reserved) await moveStock(t, order.product_id, id, order.quantity, 'إلغاء طلبية');
+        if (order.stock_reserved) await moveOrderStock(t, order, 1, 'إلغاء طلبية');
         await set('cancelled', ', stock_reserved = false, closed_at = now()');
         await logEvent(t, id, 'cancelled', note, userId);
         break;
@@ -235,7 +276,7 @@ export async function applyAction(db, id, action, { userId = null, note = null }
         break;
       case 'return_received':
         if (order.status !== 'returned' || order.return_received_at) throw new HttpError(409, 'الروتور وصل من قبل');
-        if (order.stock_reserved) await moveStock(t, order.product_id, id, order.quantity, 'روتور وصل');
+        if (order.stock_reserved) await moveOrderStock(t, order, 1, 'روتور وصل');
         await t.run('UPDATE orders SET stock_reserved = false, return_received_at = now(), updated_at = now() WHERE id = ?', id);
         await logEvent(t, id, 'return_received', note, userId);
         break;
@@ -302,7 +343,7 @@ export async function backToConfirmation(db, id, { userId = null } = {}) {
   return db.tx(async (t) => {
     const current = await getOrder(t, id, { lock: true });
     if (current.status !== order.status) throw new HttpError(409, 'الطلبية تبدلت، عاود حاول');
-    if (current.stock_reserved) await moveStock(t, current.product_id, id, current.quantity, 'رجوع للتأكيد');
+    if (current.stock_reserved) await moveOrderStock(t, current, 1, 'رجوع للتأكيد');
     await t.run(`UPDATE orders SET status = 'new', stock_reserved = false, tracking = NULL, dispatch_error = NULL, delivery_status = NULL,
       confirmed_at = NULL, dispatched_at = NULL, call_attempts = 0, updated_at = now() WHERE id = ?`, id);
     await logEvent(t, id, 'reopened', note, userId);
@@ -359,7 +400,7 @@ export async function deleteOrder(db, id) {
   return db.tx(async (t) => {
     const order = await getOrder(t, id, { lock: true });
     if (['dispatched', 'delivered', 'returned'].includes(order.status)) throw new HttpError(409, 'ما تنجمش تحذف طلبية تبعثت');
-    if (order.stock_reserved) await moveStock(t, order.product_id, null, order.quantity, `حذف الطلبية ${order.reference}`);
+    if (order.stock_reserved) await moveOrderStock(t, order, 1, `حذف الطلبية ${order.reference}`, null);
     await t.run('DELETE FROM order_events WHERE order_id = ?', id);
     await t.run('UPDATE stock_movements SET order_id = NULL WHERE order_id = ?', id);
     await t.run('UPDATE orders SET duplicate_of = NULL WHERE duplicate_of = ?', id);

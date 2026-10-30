@@ -633,3 +633,50 @@ test('each account sees only the pages ticked for it', async () => {
   await api('PUT', `/api/users/${conf.id}/permissions`, { role: 'agent', permissions: ['confirm', 'stats'] });
   assert.deepEqual((await api('GET', '/api/users')).body.users.find((u) => u.id === conf.id).permissions, ['confirm', 'stats']);
 });
+
+test('one order, several products in one parcel', async () => {
+  const sb = (await api('POST', '/api/delivery/companies', { name: 'Multi Express', provider: 'sandbox' })).body;
+  await api('PUT', '/api/delivery/routes', { default_company_id: sb.id, routes: [] });
+  const a = (await api('POST', '/api/products', { name: 'Multi A', price: 2000, stock: 10 })).body;
+  const b = (await api('POST', '/api/products', { name: 'Multi B', price: 1500, stock: 10 })).body;
+  const stock = async (id) => (await api('GET', '/api/products')).body.find((p) => p.id === id).stock;
+
+  let o = (await api('POST', '/api/orders', {
+    product_id: a.id, quantity: 1, customer_name: 'M', phone: '0551660101', wilaya_code: 16, delivery_fee: 400,
+    items: [{ product_id: b.id, quantity: 2 }],
+  })).body;
+  assert.equal(o.items.length, 1);
+  assert.equal(o.items[0].product_name, 'Multi B');
+  assert.equal(o.total, 2000 + 2 * 1500 + 400);
+  assert.equal((await api('GET', '/api/orders?status=new')).body.rows.find((x) => x.id === o.id).items.length, 1);
+
+  // Changing the extra products while still open.
+  o = (await api('PUT', `/api/orders/${o.id}`, { items: [{ product_id: b.id, quantity: 1, unit_price: 1000 }] })).body;
+  assert.equal(o.total, 2000 + 1000 + 400);
+
+  o = (await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' })).body;
+  assert.equal(o.status, 'dispatched');
+  assert.equal(await stock(a.id), 9);
+  assert.equal(await stock(b.id), 9, 'the extra product leaves the stock too');
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { items: [] })).status, 409);
+
+  await api('POST', `/api/orders/${o.id}/action`, { action: 'delivered' });
+  const acc = (await api('GET', '/api/accounting')).body.products;
+  assert.equal(acc.find((p) => p.id === a.id).revenue, 2000);
+  assert.equal(acc.find((p) => p.id === b.id).revenue, 1000, 'each product gets its own sales');
+  const tracking = (x) => x.lines.find((l) => l.key === 'tracking').qty;
+  assert.equal(tracking(acc.find((p) => p.id === a.id)), 1);
+  assert.equal(tracking(acc.find((p) => p.id === b.id)), 0, 'one parcel, counted once');
+
+  // A second one cancelled after confirmation gives both products back.
+  await api('PUT', '/api/delivery/routes', { auto_dispatch: false });
+  const c = (await api('POST', '/api/orders', {
+    product_id: a.id, customer_name: 'N', phone: '0551660102', wilaya_code: 16, items: [{ product_id: b.id, quantity: 3 }],
+  })).body;
+  await api('POST', `/api/orders/${c.id}/action`, { action: 'confirm' });
+  assert.equal(await stock(b.id), 6);
+  await api('POST', `/api/orders/${c.id}/action`, { action: 'cancel' });
+  assert.equal(await stock(a.id), 9);
+  assert.equal(await stock(b.id), 9);
+  await api('PUT', '/api/delivery/routes', { auto_dispatch: true });
+});
