@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import { WILAYAS } from '../wilayas.js';
 import { createOrder, HttpError } from '../services/orders.js';
 import { readBody } from './api.js';
+import * as lf from '../services/lightfunnels.js';
 
 // Endpoints called from the product landing pages (any domain), so CORS is open.
 export function publicRouter(db) {
@@ -51,6 +52,30 @@ export function publicRouter(db) {
       utm_campaign: b.utm_campaign,
     }, { source: 'landing' });
     return c.json({ ok: true, reference: order.reference, total: order.total }, 201);
+  });
+
+  // LightFunnels sends the orders here (webhooks registered when the app is connected).
+  // The body is signed with the app secret; a bad signature gets 403 and unexpected errors 500 (LightFunnels retries).
+  r.post('/lightfunnels/:linkId/:topic', async (c) => {
+    const topic = c.req.param('topic');
+    if (!['created', 'confirmed'].includes(topic)) return c.json({ error: 'Not found' }, 404);
+    const raw = await c.req.text();
+    if (!lf.validSignature(raw, c.req.header('lightfunnels-hmac'))) return c.json({ error: 'bad signature' }, 403);
+    const link = await db.get('SELECT * FROM lightfunnels_links WHERE id = ?', Number(c.req.param('linkId')) || 0);
+    if (!link || !link.active) return c.json({ error: 'Not found' }, 404);
+    let node = null;
+    try {
+      const payload = JSON.parse(raw);
+      node = payload.node ?? payload;
+      const result = await lf.handleOrderEvent(db, link, topic, node);
+      await lf.recordEvent(db, link, topic, node, result.ignored ? 'ignored' : result.duplicate ? 'duplicate' : 'imported', null, result.order_id);
+      return c.json({ ok: true });
+    } catch (e) {
+      if (!(e instanceof HttpError) && !(e instanceof SyntaxError)) throw e;
+      // An order we can't read is kept with the reason; answering 200 stops LightFunnels from retrying it.
+      await lf.recordEvent(db, link, topic, node, 'error', e.message);
+      return c.json({ ok: false, error: e.message });
+    }
   });
 
   return r;

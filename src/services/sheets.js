@@ -131,14 +131,14 @@ const number = (v) => {
 };
 const isDesk = (v) => /desk|bureau|stop|agence|office|مكتب/i.test(String(v || ''));
 
-function sheetPhone(v) {
+export function sheetPhone(v) {
   const p = String(v ?? '').replace(/[\s.\-()]/g, '');
   return normalizePhone(/^[567]\d{8}$/.test(p) ? `0${p}` : p);
 }
 
 // The product a row is for: same name or SKU in this store, else created with stock 0
 // in the store for new products (TEST), or in the sheet's store.
-async function productFor(db, source, name, sku, unitPrice) {
+export async function productFor(db, source, name, sku, unitPrice) {
   const key = fold(name);
   const products = await db.all('SELECT id, name, sku, store_id FROM products');
   const sameStore = (p) => !source.store_id || p.store_id === source.store_id;
