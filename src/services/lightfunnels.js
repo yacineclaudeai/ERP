@@ -103,12 +103,15 @@ export async function fetchCheckout(db, link, id) {
 export async function pullRecent(db, link, { first = 25 } = {}) {
   const data = await graphql(db, link, `query($first: Int) { orders(query: "order_by:id order_dir:desc", first: $first) { edges { node { ${ORDER_FIELDS} } } } }`, { first });
   const nodes = (data.orders?.edges || []).map((e) => e.node).reverse();
-  const result = { seen: nodes.length, imported: 0, errors: [] };
+  const result = { seen: nodes.length, imported: 0, imported_names: [], errors: [] };
   for (const node of nodes) {
     try {
       const r = await handleOrderEvent(db, link, 'created', node);
       await recordEvent(db, link, 'pull', node, r.ignored ? 'ignored' : r.duplicate ? 'duplicate' : 'imported', null, r.order_id);
-      if (!r.ignored && !r.duplicate) result.imported++;
+      if (!r.ignored && !r.duplicate) {
+        result.imported++;
+        result.imported_names.push(node.name || node._id);
+      }
     } catch (e) {
       if (!(e instanceof HttpError)) throw e;
       await recordEvent(db, link, 'pull', node, 'error', e.message);
@@ -126,12 +129,13 @@ export async function compareOrders(db, link, { q = '', pages = 6, importMissing
   const words = fold(q).split(' ').filter(Boolean);
   const nodes = [];
   let after = null;
-  for (let page = 0; page < Math.min(Math.max(1, pages), 10); page++) {
-    const data = await graphql(db, link, `query($first: Int, $after: String) { orders(query: "order_by:id order_dir:desc", first: $first, after: $after) { edges { cursor node { ${ORDER_FIELDS} } } } }`, { first: 50, after });
+  for (let page = 0; page < Math.min(Math.max(1, pages) * 2, 20); page++) {
+    // LightFunnels gives at most 25 orders per page.
+    const data = await graphql(db, link, `query($first: Int, $after: String) { orders(query: "order_by:id order_dir:desc", first: $first, after: $after) { edges { cursor node { ${ORDER_FIELDS} } } pageInfo { endCursor hasNextPage } } }`, { first: 25, after });
     const edges = data.orders?.edges || [];
     nodes.push(...edges.map((e) => e.node));
-    if (edges.length < 50 || !edges.at(-1).cursor) break;
-    after = edges.at(-1).cursor;
+    after = data.orders?.pageInfo?.endCursor || edges.at(-1)?.cursor;
+    if (edges.length < 25 || data.orders?.pageInfo?.hasNextPage === false || !after) break;
   }
   const titles = (n) => (n.items || []).map((i) => i?.title).filter(Boolean);
   const wanted = nodes.filter((n) => !n.test && (!words.length || words.every((w) => fold(titles(n).join(' ')).includes(w))));
@@ -165,6 +169,21 @@ export async function compareOrders(db, link, { q = '', pages = 6, importMissing
     });
   }
   return { scanned: nodes.length, oldest: text(nodes.at(-1)?.created_at), matched: rows.length, missing: rows.filter((r) => !r.order_id).length, imported, rows };
+}
+
+// The scheduled catch-up: the latest orders of every connected account.
+export async function pullAllLinks(db) {
+  const out = {};
+  for (const link of await db.all('SELECT * FROM lightfunnels_links WHERE active AND access_token IS NOT NULL ORDER BY id')) {
+    try {
+      const r = await pullRecent(db, link);
+      out[link.name] = { seen: r.seen, imported: r.imported, imported_names: r.imported_names, errors: r.errors };
+    } catch (e) {
+      if (!(e instanceof HttpError)) throw e;
+      out[link.name] = { error: e.message };
+    }
+  }
+  return out;
 }
 
 // After the user accepts: keep the tokens and ask LightFunnels to send the orders here.

@@ -1155,3 +1155,32 @@ test('abandoned checkout without name or wilaya still comes in; it waits for the
     delete process.env.LF_CLIENT_SECRET;
   }
 });
+
+test('scheduled catch-up: the latest LightFunnels orders whose webhook never came are imported', async () => {
+  process.env.LF_CLIENT_ID = 'test-client';
+  process.env.LF_CLIENT_SECRET = 'test-secret';
+  const { pullAllLinks } = await import('../src/services/lightfunnels.js');
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const { id } = (await api('POST', '/api/lightfunnels', { name: 'compte catchup' })).body;
+  await db.run("UPDATE lightfunnels_links SET active = false WHERE id <> ?", id);
+  await db.run("UPDATE lightfunnels_links SET access_token = 'tok', expires_at = now() + interval '1 hour' WHERE id = ?", id);
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).startsWith('https://services.lightfunnels.com')) return real(url, init);
+    return Response.json({ data: { orders: { edges: [{ node: {
+      id: 'order_catch', _id: 7201, name: '#CATCH1', total: 4400, shipping: 700, test: false,
+      shipping_address: { first_name: 'Catch', phone: '0551990088', line1: 'Rue 9', city: 'Oran', state: 'Oran' },
+      items: [{ title: 'بجامة قطيفة 5 قطع🐆', sku: '', price: 3700 }],
+    } }] } } });
+  };
+  try {
+    const r = await pullAllLinks(db);
+    assert.deepEqual(r['compte catchup'].imported_names, ['#CATCH1']);
+    assert.equal((await pullAllLinks(db))['compte catchup'].imported, 0, 'once');
+    assert.equal((await db.get("SELECT count(*)::int AS n FROM orders WHERE phone = '0551990088' AND source = 'lightfunnels'")).n, 1);
+  } finally {
+    globalThis.fetch = real;
+    delete process.env.LF_CLIENT_ID;
+    delete process.env.LF_CLIENT_SECRET;
+  }
+});
