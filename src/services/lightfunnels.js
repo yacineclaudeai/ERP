@@ -229,18 +229,19 @@ function variantOnly(title, variant) {
 
 // A LightFunnels order (the webhook's "node") to what the ERP needs. Field names are tried in
 // several spellings, because the payload is only partly documented. Throws with the reason.
-export function nodeToOrder(node) {
+// incomplete: an abandoned checkout is kept without a name or wilaya (wilaya 0 = not chosen yet).
+export function nodeToOrder(node, { incomplete = false } = {}) {
   const ship = node.shipping_address || {};
   const name = text(ship.full_name) || text([ship.first_name, ship.last_name].filter(Boolean).join(' '))
     || text(pick(node, 'customer.full_name', 'billing_address.full_name', 'full_name', 'customer_name'))
     || text([pick(node, 'customer.first_name', 'first_name'), pick(node, 'customer.last_name', 'last_name')].filter(Boolean).join(' '));
-  if (!name) throw new HttpError(400, 'الاسم ناقص');
+  if (!name && !incomplete) throw new HttpError(400, 'الاسم ناقص');
   const phone = sheetPhone(pick(node, 'shipping_address.phone', 'customer.phone', 'billing_address.phone', 'phone'));
   if (!phone) throw new HttpError(400, `رقم غير صحيح "${pick(node, 'shipping_address.phone', 'customer.phone') ?? ''}"`);
   const stateRaw = pick(node, 'shipping_address.state', 'shipping_address.province', 'shipping_address.state_code', 'shipping_address.region');
   // Some landing pages put the wilaya in the city field and leave the state empty.
   const wilaya = parseWilaya(stateRaw) || parseWilaya(pick(node, 'shipping_address.city'));
-  if (!wilaya) throw new HttpError(400, `ولاية غير معروفة "${stateRaw ?? ''}"`);
+  if (!wilaya && !incomplete) throw new HttpError(400, `ولاية غير معروفة "${stateRaw ?? ''}"`);
   const items = ([node.items, node.line_items, node.lines, node.products].find(Array.isArray) || []).map((i) => {
     // The product name without its options: from the product itself when sent, else cut from the line title.
     const full = text(pick(i, 'title', 'name'));
@@ -264,7 +265,7 @@ export function nodeToOrder(node) {
   return {
     customer_name: name,
     phone,
-    wilaya_code: wilaya,
+    wilaya_code: wilaya || 0,
     commune: text(pick(node, 'shipping_address.city', 'shipping_address.commune', 'shipping_address.area')),
     address: text([ship.address1 ?? ship.line1 ?? ship.address, ship.address2 ?? ship.line2].filter(Boolean).join(' ')),
     stop_desk: /desk|bureau|stop|agence|office|مكتب/i.test(method),
@@ -328,7 +329,7 @@ export async function handleCheckoutEvent(db, link, node) {
   const lfId = `co:${rawId}`;
   let parsed;
   try {
-    parsed = nodeToOrder(node);
+    parsed = nodeToOrder(node, { incomplete: true });
   } catch (e) {
     if (!(e instanceof HttpError)) throw e;
     return { ignored: `ناقص: ${e.message}`, node };
@@ -337,7 +338,16 @@ export async function handleCheckoutEvent(db, link, node) {
     return { ignored: 'الزبون دار الطلبية', node };
   }
   const claim = await db.run('INSERT INTO lightfunnels_orders (link_id, lf_order_id) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING lf_order_id', link.id, lfId);
-  if (!claim.rows.length) return { duplicate: true, node };
+  if (!claim.rows.length) {
+    // A later update of the same checkout can bring the name or wilaya that was missing.
+    const known = await db.get(`SELECT o.id, o.wilaya_code, o.customer_name FROM lightfunnels_orders l JOIN orders o ON o.id = l.order_id
+      WHERE l.link_id = ? AND l.lf_order_id = ? AND o.status = 'new' AND o.call_attempts = 0`, link.id, lfId);
+    const fill = {};
+    if (known && known.wilaya_code === 0 && parsed.wilaya_code) Object.assign(fill, { wilaya_code: parsed.wilaya_code, commune: parsed.commune, address: parsed.address });
+    if (known && known.customer_name === 'بلا اسم' && parsed.customer_name) fill.customer_name = parsed.customer_name;
+    if (Object.keys(fill).length) await updateOrder(db, known.id, fill);
+    return { duplicate: true, node, order_id: known?.id ?? null };
+  }
   try {
     const [main, ...rest] = await orderLines(db, link, parsed);
     const order = await createOrder(db, {

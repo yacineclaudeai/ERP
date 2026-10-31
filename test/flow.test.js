@@ -1125,3 +1125,33 @@ test('compare with LightFunnels: shows which orders of a product are in the ERP 
     delete process.env.LF_CLIENT_SECRET;
   }
 });
+
+test('abandoned checkout without name or wilaya still comes in; it waits for the wilaya before confirming', async () => {
+  const crypto = await import('node:crypto');
+  process.env.LF_CLIENT_ID = 'test-client';
+  process.env.LF_CLIENT_SECRET = 'test-secret';
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const link = (await api('POST', '/api/lightfunnels', { name: 'compte incomplete' })).body;
+  const send = (node) => {
+    const raw = JSON.stringify({ node });
+    const mac = crypto.createHmac('sha256', 'test-secret').update(raw).digest('base64');
+    return fetch(`${base}/api/public/lightfunnels/${link.id}/checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'lightfunnels-hmac': mac }, body: raw });
+  };
+  const node = (address) => ({ id: 'checkout_inc', _id: 7101, phone: '0551990066', shipping_address: address,
+    items: [{ title: 'LF Incomplete Item', price: 3700, quantity: 1 }] });
+  try {
+    await send(node({ city: '', state: '' }));
+    let [o] = (await api('GET', '/api/orders?q=0551990066')).body.rows;
+    assert.deepEqual([o.source, o.wilaya_code, o.customer_name], ['abandoned', 0, 'بلا اسم']);
+    const r = await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' });
+    assert.equal(r.status, 400, 'no confirmation without a wilaya');
+    assert.equal((await api('PUT', `/api/orders/${o.id}`, { notes: 'rappeler' })).status, 200, 'editable while the wilaya is missing');
+    // A later update of the same checkout brings the missing details.
+    await send(node({ first_name: 'Karim', city: 'Oran', state: 'Oran' }));
+    [o] = (await api('GET', '/api/orders?q=0551990066')).body.rows;
+    assert.deepEqual([o.wilaya_code, o.customer_name], [31, 'Karim']);
+  } finally {
+    delete process.env.LF_CLIENT_ID;
+    delete process.env.LF_CLIENT_SECRET;
+  }
+});

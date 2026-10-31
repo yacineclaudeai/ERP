@@ -108,8 +108,10 @@ export async function getOrder(db, id, { lock = false } = {}) {
   return order;
 }
 
-function validateOrderFields(input) {
-  const customer_name = String(input.customer_name ?? input.name ?? '').trim();
+// incomplete: an abandoned checkout may come without a name or wilaya (wilaya 0 = not chosen yet);
+// the agent fills them during the call, and the order can't be confirmed before.
+function validateOrderFields(input, { incomplete = false } = {}) {
+  const customer_name = String(input.customer_name ?? input.name ?? '').trim() || (incomplete ? 'بلا اسم' : '');
   const phone = normalizePhone(input.phone);
   const phone2 = input.phone2 ? normalizePhone(input.phone2) : null;
   const wilaya_code = Number(input.wilaya_code ?? input.wilaya);
@@ -117,7 +119,7 @@ function validateOrderFields(input) {
   if (!customer_name) throw new HttpError(400, 'الاسم ضروري');
   if (!phone) throw new HttpError(400, 'رقم الهاتف غير صحيح');
   if (input.phone2 && !phone2) throw new HttpError(400, 'رقم الهاتف الثاني غير صحيح');
-  if (!isValidWilaya(wilaya_code)) throw new HttpError(400, 'الولاية غير صحيحة');
+  if (!isValidWilaya(wilaya_code) && !(incomplete && wilaya_code === 0)) throw new HttpError(400, 'الولاية غير صحيحة');
   return {
     customer_name,
     phone,
@@ -139,7 +141,7 @@ export async function createOrder(db, input, { source = 'manual', userId = null,
     : await db.get('SELECT * FROM products WHERE public_key = ?', String(input.key ?? ''));
   if (!product || (source === 'landing' && !product.active)) throw new HttpError(404, 'المنتج غير موجود');
 
-  const f = validateOrderFields(input);
+  const f = validateOrderFields(input, { incomplete: source === 'abandoned' });
   const route = await resolveRoute(db, f.wilaya_code, product.store_id, product.company_id);
   const trusted = source !== 'landing';
   const unit_price = input.unit_price != null && trusted ? Number(input.unit_price) : product.price;
@@ -177,7 +179,8 @@ export async function updateOrder(db, id, input, userId = null) {
   return db.tx(async (t) => {
     const order = await getOrder(t, id, { lock: true });
     if (!EDITABLE.includes(order.status)) throw new HttpError(409, 'لا يمكن تعديل طلبية بعد إرسالها');
-    const f = validateOrderFields({ ...order, ...input });
+    // An order that came without a wilaya keeps "not chosen" until the agent picks one.
+    const f = validateOrderFields({ ...order, ...input }, { incomplete: order.wilaya_code === 0 });
     // The product can change only while no stock is held for the order.
     let product = null;
     if (input.product_id != null && Number(input.product_id) !== order.product_id) {
@@ -272,6 +275,7 @@ export async function applyAction(db, id, action, { userId = null, note = null, 
         break;
       case 'confirm':
         if (!OPEN.includes(order.status)) throw new HttpError(409, 'الطلبية مؤكدة أو مغلقة من قبل');
+        if (!isValidWilaya(order.wilaya_code)) throw new HttpError(400, 'اختار الولاية قبل ما تأكد');
         await moveOrderStock(t, order, -1, 'تأكيد طلبية');
         await set('confirmed', ', stock_reserved = true, confirmed_at = now(), dispatch_error = NULL');
         await logEvent(t, id, 'confirmed', note, userId);

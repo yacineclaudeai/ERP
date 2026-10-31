@@ -29,9 +29,10 @@ const pct = (v) => (v == null ? '—' : `${v}%`);
 const badge = (s) => `<span class="badge ${s}">${STATUS_LABELS[s] || s}</span>`;
 const wilaya = (code) => {
   const w = state.meta?.wilayas.find((x) => x.code === Number(code));
-  return w ? `${w.code} - ${w.name_ar}` : code;
+  return w ? `${w.code} - ${w.name_ar}` : Number(code) === 0 ? 'اختر الولاية' : code;
 };
-const wilayaOptions = (selected) => state.meta.wilayas
+// Wilaya 0 = an abandoned checkout where the customer didn't choose one yet.
+const wilayaOptions = (selected) => (Number(selected) === 0 ? '<option value="0" selected>اختر الولاية</option>' : '') + state.meta.wilayas
   .map((w) => `<option value="${w.code}" ${Number(selected) === w.code ? 'selected' : ''}>${w.code} - ${w.name_ar} / ${w.name_fr}</option>`).join('');
 const today = () => new Date().toISOString().slice(0, 10);
 // Timestamps come from the server in UTC; show them in Algeria time.
@@ -708,7 +709,7 @@ function orderRow(o, products, companies, stores) {
           ${stores.map((s) => `<option value="${s.id}" ${s.id === o.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`
       : esc(o.store_name || '—')}</td>
     <td>${edit ? pick('stop_desk', [['0', 'المنزل'], ['1', 'مكتب']], o.stop_desk ? '1' : '0') : o.stop_desk ? 'مكتب' : 'المنزل'}</td>
-    <td>${edit ? pick('wilaya_code', state.meta.wilayas.map((w) => [w.code, `${w.code} - ${w.name_fr}`]), o.wilaya_code, '', 'w') : esc(wilaya(o.wilaya_code))}</td>
+    <td>${edit ? pick('wilaya_code', state.meta.wilayas.map((w) => [w.code, `${w.code} - ${w.name_fr}`]), o.wilaya_code || '', o.wilaya_code ? '' : 'اختر الولاية', 'w') : esc(wilaya(o.wilaya_code))}</td>
     <td>${text('commune', o.commune, 'style="width:110px"')}</td>
     <td class="prod-cell" title="${esc(o.product_name)}"><div class="clamp">${esc(o.product_name)}</div>${o.items?.length ? `<div class="extra-items" title="${esc(o.items.map((i) => `${i.product_name} × ${i.quantity}`).join('، '))}">+ ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : ''}</td>
     <td class="variant-cell">${text('variant', o.variant, 'style="width:120px" placeholder="—"')}</td>
