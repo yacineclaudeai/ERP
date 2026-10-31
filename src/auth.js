@@ -40,8 +40,11 @@ function unsign(token) {
   }
 }
 
+// A short fingerprint of the stored password: a session made before a password change stops working.
+const passwordVersion = (hash) => crypto.createHash('sha256').update(String(hash)).digest('base64url').slice(0, 12);
+
 export function setSession(c, user) {
-  const token = sign({ uid: user.id, exp: Date.now() + SESSION_DAYS * 86400_000 });
+  const token = sign({ uid: user.id, pv: passwordVersion(user.password_hash), exp: Date.now() + SESSION_DAYS * 86400_000 });
   setCookie(c, COOKIE, token, {
     httpOnly: true,
     sameSite: 'Lax',
@@ -71,8 +74,8 @@ export function authMiddleware(db) {
       return next();
     }
     const session = unsign(getCookie(c, COOKIE));
-    const row = session && await db.get('SELECT id, username, role, permissions, accounting_store_ids FROM users WHERE id = ?', session.uid);
-    if (!row) return c.json({ error: 'غير مسجل' }, 401);
+    const row = session && await db.get('SELECT id, username, role, permissions, accounting_store_ids, password_hash FROM users WHERE id = ?', session.uid);
+    if (!row || session.pv !== passwordVersion(row.password_hash)) return c.json({ error: 'غير مسجل' }, 401);
     c.set('user', publicUser(row));
     return next();
   };

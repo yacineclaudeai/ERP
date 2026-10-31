@@ -74,7 +74,7 @@
       var qty = Math.max(1, parseInt(form.quantity.value, 10) || 1);
       var desk = form.querySelector('[name=stop_desk]:checked').value === '1';
       var fee = w ? (desk ? w.desk_fee : w.home_fee) : 0;
-      sum.innerHTML = p.name + ': ' + (p.price * qty).toLocaleString() + ' دج<br>التوصيل: ' +
+      sum.innerHTML = String(p.name).replace(/[&<>"']/g, function (ch) { return '&#' + ch.charCodeAt(0) + ';'; }) + ': ' + (p.price * qty).toLocaleString() + ' دج<br>التوصيل: ' +
         (w ? fee.toLocaleString() + ' دج' : '—') + '<br><b>المجموع: ' + (p.price * qty + fee).toLocaleString() + ' دج</b>';
     }
     form.addEventListener('input', refresh);

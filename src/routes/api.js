@@ -41,12 +41,27 @@ export function apiRouter(db) {
   const body = (c) => c.get('body') || {};
 
   // ---- auth ----
+  // Wrong passwords: 20 tries per address per 10 minutes, and an account is locked 15 minutes after 5 in a row.
+  const loginHits = new Map();
   r.post('/auth/login', async (c) => {
     const b = body(c);
+    const ip = c.req.header('x-nf-client-connection-ip') || c.req.header('x-forwarded-for') || 'unknown';
+    const now = Date.now();
+    const recent = (loginHits.get(ip) || []).filter((t) => now - t < 600_000);
+    if (recent.length >= 20) return c.json({ error: 'محاولات كثيرة، عاود من بعد 10 دقايق' }, 429);
     const user = await db.get('SELECT * FROM users WHERE username = ?', String(b.username || ''));
+    if (user?.locked_until && new Date(user.locked_until).getTime() > now) {
+      return c.json({ error: 'الحساب مقفول 15 دقيقة بسبب محاولات غالطة كثيرة' }, 429);
+    }
     if (!user || !verifyPassword(String(b.password || ''), user.password_hash)) {
+      loginHits.set(ip, [...recent, now]);
+      if (user) {
+        await db.run(`UPDATE users SET failed_logins = failed_logins + 1,
+          locked_until = CASE WHEN failed_logins + 1 >= 5 THEN now() + interval '15 minutes' ELSE locked_until END WHERE id = ?`, user.id);
+      }
       return c.json({ error: 'اسم المستخدم أو كلمة السر غير صحيحة' }, 401);
     }
+    if (user.failed_logins || user.locked_until) await db.run('UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?', user.id);
     setSession(c, user);
     return c.json(publicUser(user));
   });
@@ -734,7 +749,10 @@ export function apiRouter(db) {
     if (user.role !== 'admin' && user.id !== id) throw new HttpError(403, 'ممنوع');
     const password = String(body(c).password || '');
     if (password.length < 6) throw new HttpError(400, 'كلمة السر 6 حروف على الأقل');
-    await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), id);
+    const hash = hashPassword(password);
+    await db.run('UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE id = ?', hash, id);
+    // Other sessions of that account end; this browser stays signed in when it changed its own password.
+    if (user.id === id) setSession(c, { id, password_hash: hash });
     return c.json({ ok: true });
   });
 
