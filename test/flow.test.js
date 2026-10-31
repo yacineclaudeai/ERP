@@ -1039,3 +1039,32 @@ test('customer check: each order shows how many orders of that phone were delive
   assert.ok(rows.length >= 1);
   for (const o of rows) assert.deepEqual([o.delivered_count, o.returned_count], [1, 1]);
 });
+
+test('customer check: old parcels read from Ecotrack count too, once', async () => {
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const { rows: [co] } = await db.run("INSERT INTO delivery_companies (name, provider, base_url) VALUES ('Hist Co', 'ecotrack', 'https://hist.ecotrack.dz') RETURNING id");
+  const store = (await api('POST', '/api/stores', { name: 'Hist Store' })).body;
+  await db.run("INSERT INTO store_accounts (store_id, company_id, api_token) VALUES (?, ?, 'tok')", store.id, co.id);
+  const accounts = (await api('GET', '/api/history/accounts')).body;
+  assert.ok(accounts.some((a) => a.store_id === store.id && a.company_id === co.id));
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).startsWith('https://hist.ecotrack.dz')) return real(url, init);
+    return Response.json({ last_page: 1, data: [
+      { tracking: 'H1', phone: '551990099', global_status: 'livre' },
+      { tracking: 'H2', phone: '0551990099', global_status: 'retour' },
+      { tracking: 'H3', phone: '0551990099', global_status: 'en_process' },
+    ] });
+  };
+  try {
+    const r = (await api('POST', '/api/history/import', { store_id: store.id, company_id: co.id, page: 1 })).body;
+    assert.deepEqual([r.read, r.kept], [3, 2]);
+    await api('POST', '/api/history/import', { store_id: store.id, company_id: co.id, page: 1 });
+  } finally {
+    globalThis.fetch = real;
+  }
+  const p = (await api('POST', '/api/products', { name: 'Hist item', price: 1000 })).body;
+  await api('POST', '/api/orders', { product_id: p.id, customer_name: 'H', phone: '0551990099', wilaya_code: 16 });
+  const [o] = (await api('GET', '/api/orders?q=0551990099')).body.rows;
+  assert.deepEqual([o.delivered_count, o.returned_count], [1, 1]);
+});
