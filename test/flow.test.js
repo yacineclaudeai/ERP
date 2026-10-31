@@ -1007,3 +1007,22 @@ test('LightFunnels options stay out of the product name; old variant products ar
   const moved = (await api('GET', `/api/orders/${o.id}`)).body;
   assert.deepEqual([moved.product_id, moved.variant], [a, 'tailles:XL/42']);
 });
+
+test('security: wrong passwords lock the account, a password change ends old sessions', async () => {
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  await api('POST', '/api/users', { username: 'locky', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  for (let i = 0; i < 5; i++) assert.equal((await api('POST', '/api/auth/login', { username: 'locky', password: 'wrong' })).status, 401);
+  assert.equal((await api('POST', '/api/auth/login', { username: 'locky', password: 'secret1' })).status, 429, 'locked even with the right password');
+  await db.run("UPDATE users SET locked_until = now() - interval '1 minute' WHERE username = 'locky'");
+  assert.equal((await api('POST', '/api/auth/login', { username: 'locky', password: 'secret1' })).status, 200);
+  assert.equal((await db.get("SELECT failed_logins FROM users WHERE username = 'locky'")).failed_logins, 0);
+
+  // A session made before the password changed no longer works.
+  const id = (await api('GET', '/api/auth/me')).body.id;
+  const before = cookie;
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  await api('PUT', `/api/users/${id}/password`, { password: 'secret2' });
+  cookie = before;
+  assert.equal((await api('GET', '/api/auth/me')).status, 401);
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+});
