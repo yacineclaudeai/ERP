@@ -1026,3 +1026,16 @@ test('security: wrong passwords lock the account, a password change ends old ses
   assert.equal((await api('GET', '/api/auth/me')).status, 401);
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
 });
+
+test('customer check: each order shows how many orders of that phone were delivered or returned', async () => {
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const p = (await api('POST', '/api/products', { name: 'Check item', price: 1000, stock: 10 })).body;
+  const mk = async () => (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'C', phone: '0551990088', wilaya_code: 16 })).body.id;
+  const [a, b] = [await mk(), await mk()];
+  await db.run("UPDATE orders SET status = 'delivered' WHERE id = ?", a);
+  await db.run("UPDATE orders SET status = 'returned' WHERE id = ?", b);
+  await mk();
+  const rows = (await api('GET', '/api/orders?q=0551990088&limit=500')).body.rows;
+  assert.ok(rows.length >= 1);
+  for (const o of rows) assert.deepEqual([o.delivered_count, o.returned_count], [1, 1]);
+});

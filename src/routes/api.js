@@ -271,6 +271,17 @@ export function apiRouter(db) {
       FROM order_items i JOIN products p ON p.id = i.product_id
       WHERE i.order_id IN (${rows.map(() => '?').join(',')}) ORDER BY i.id`, ...rows.map((o) => o.id)) : [];
     for (const o of rows) o.items = items.filter((i) => i.order_id === o.id);
+    // Customer check: how many of this phone's orders were delivered or returned (all stores, our own data).
+    const phones = [...new Set(rows.map((o) => o.phone).filter(Boolean))];
+    const history = phones.length ? await db.all(`SELECT phone, COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
+      COUNT(*) FILTER (WHERE status = 'returned') AS returned FROM orders
+      WHERE phone IN (${phones.map(() => '?').join(',')}) GROUP BY phone`, ...phones) : [];
+    const byPhone = new Map(history.map((h) => [h.phone, h]));
+    for (const o of rows) {
+      const h = byPhone.get(o.phone);
+      o.delivered_count = Number(h?.delivered || 0);
+      o.returned_count = Number(h?.returned || 0);
+    }
     return c.json({ rows, total });
   });
 

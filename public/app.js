@@ -683,7 +683,9 @@ function orderRow(o, products, companies, stores) {
     <td class="nowrap muted">${esc(fmtDate(o.created_at))}</td>
     <td>${text('customer_name', o.customer_name, 'style="width:130px"')}</td>
     <td class="nowrap"><a class="wa" href="${whatsapp(o.phone)}" target="_blank" rel="noopener" title="WhatsApp">●</a>
-      ${text('phone', o.phone, 'style="width:100px" dir="ltr"')}</td>
+      ${text('phone', o.phone, 'style="width:100px" dir="ltr"')}
+      <span class="cust-check ${o.returned_count > o.delivered_count ? 'bad' : o.returned_count ? 'warn' : o.delivered_count ? 'good' : ''}"
+        title="هاد الزبون: ${o.delivered_count} مستلمة و ${o.returned_count} روتور">✅ ${o.delivered_count} · ↩️ ${o.returned_count}</span></td>
     <td class="nowrap"><span class="calls ${o.call_attempts ? 'has' : ''}" title="محاولات الاتصال">${o.call_attempts || 0} ✆</span>
       ${['new', 'no_answer', 'postponed'].includes(o.status) ? '<button class="plus" data-attempt title="ما ردش: الفاشلة اللي بعدها">+1</button>' : ''}
       ${o.status === 'no_answer' ? '<button class="plus" data-unattempt title="غلطت: الفاشلة اللي قبلها">-1</button>' : ''}</td>
