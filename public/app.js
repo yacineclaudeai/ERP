@@ -978,6 +978,33 @@ async function orderForm(order, products) {
 
 // Reads each store's parcels page by page (each page is one short request),
 // then links every product to the store that ships it.
+// Reads the old parcels of every store account, page by page, for the customer check.
+async function historyDialog() {
+  const box = modal.open(`<h3>الداتا القديمة للتحقق</h3>
+    <p class="muted">نقراو الطرود تاع آخر عام عند كل حساب (Ecotrack). نحفظو غير الرقم والنتيجة (مستلمة ولا روتور). ما نبدلو والو عندهم.</p>
+    <ul class="timeline" id="history-log"></ul><div class="actions"><button class="btn" data-close>إغلاق</button></div>`);
+  const log = (html) => box.querySelector('#history-log').insertAdjacentHTML('beforeend', `<li>${html}</li>`);
+  const accounts = await api('GET', '/history/accounts');
+  if (!accounts.length) log('<span class="neg">ما كاين حتى حساب Ecotrack بالتوكن</span>');
+  for (const a of accounts) {
+    let page = 1;
+    let last = 1;
+    let kept = 0;
+    try {
+      do {
+        const r = await api('POST', '/history/import', { store_id: a.store_id, company_id: a.company_id, page });
+        kept += r.kept;
+        last = r.last_page;
+        page += 1;
+      } while (page <= last && box.isConnected);
+      log(`${esc(a.store_name)} · ${esc(a.company_name)}: ${kept} طرد (مستلمة/روتور)`);
+    } catch (err) {
+      log(`${esc(a.store_name)} · ${esc(a.company_name)}: <span class="neg">${esc(err.message)}</span>`);
+    }
+  }
+  log('<b>كمل</b>');
+}
+
 async function linkStoresDialog(stores) {
   const box = modal.open(`<h3>ربط المنتجات بالفروع</h3>
     <p class="muted">نقراو الطرود تاع آخر 60 يوم عند شركة التوصيل تاع كل فرع. ما نبعثو والو ما نبدلو والو عندهم.</p>
@@ -1485,6 +1512,7 @@ async function storesPage() {
     <h2>البوتيكات</h2>
     <p class="muted">كل بوتيك عندها شركة توصيل، وعندها حسابها الخاص (التوكن) عند كل شركة تخدم معاها. باش تزيد توكن لبوتيك كاينة اضغط "تعديل" قدامها (ماشي "+ بوتيك"). المنتجات تتربط بالبوتيك والشركة من صفحة "المنتجات".</p>
     <div class="bar"><button class="btn primary" id="add">+ بوتيك</button>
+      ${isAdminUser() ? '<button class="btn" id="history" title="يقرا الطرود تاع العام اللي فات عند شركات التوصيل، باش التحقق (مستلمة/روتور) يحسب حتى القدام">جيب الداتا القديمة للتحقق</button>' : ''}
       <label>المنتجات الجديدة تروح لـ <select id="new-products"><option value="">— بلا بوتيك</option>
         ${stores.map((s) => `<option value="${s.id}" ${s.new_products ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
     <div class="table-wrap"><table>
@@ -1495,6 +1523,7 @@ async function storesPage() {
         <td class="num">${s.products_count}</td>
         <td><button class="btn small" data-edit="${s.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">زيد البوتيك الأولى</td></tr>'}
     </table></div>`);
+  if (main.querySelector('#history')) main.querySelector('#history').onclick = guard(historyDialog);
   main.querySelector('#add').onclick = () => storeForm(null, companies);
   main.querySelector('#new-products').onchange = guard(async (e) => {
     await api('PUT', '/stores/new-products', { store_id: e.target.value });

@@ -18,6 +18,7 @@ import {
   getAdSettings, saveAdSettings, getAdPlan, listAdCampaigns, recordAdCampaign, updateAdCampaign,
 } from '../services/ads.js';
 import { scanStore, applyStoreLinks, normalizeName, newProductStore } from '../services/branches.js';
+import { historyAccounts, importHistoryPage } from '../services/history.js';
 import { SHEET_FIELDS, fetchSheetRows, mergeVariantProducts, suggestMapping, syncSheet, syncAllSheets } from '../services/sheets.js';
 import * as lf from '../services/lightfunnels.js';
 
@@ -168,6 +169,12 @@ export function apiRouter(db) {
     const b = body(c);
     return c.json(await scanStore(db, Number(b.store_id), Math.max(1, Number(b.page) || 1)));
   });
+  // Old parcels from the delivery companies, for the customer check.
+  r.get('/history/accounts', requireAdmin, async (c) => c.json(await historyAccounts(db)));
+  r.post('/history/import', requireAdmin, async (c) => {
+    const b = body(c);
+    return c.json(await importHistoryPage(db, Number(b.store_id), Number(b.company_id), Math.max(1, Number(b.page) || 1)));
+  });
   r.post('/branches/apply', requirePerm('products'), async (c) => c.json(await applyStoreLinks(db, body(c).texts)));
 
   r.post('/products/:id/regenerate-key', requirePerm('products'), async (c) => {
@@ -273,9 +280,12 @@ export function apiRouter(db) {
     for (const o of rows) o.items = items.filter((i) => i.order_id === o.id);
     // Customer check: how many of this phone's orders were delivered or returned (all stores, our own data).
     const phones = [...new Set(rows.map((o) => o.phone).filter(Boolean))];
-    const history = phones.length ? await db.all(`SELECT phone, COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
-      COUNT(*) FILTER (WHERE status = 'returned') AS returned FROM orders
-      WHERE phone IN (${phones.map(() => '?').join(',')}) GROUP BY phone`, ...phones) : [];
+    const marks = phones.map(() => '?').join(',');
+    const history = phones.length ? await db.all(`SELECT phone, COUNT(*) FILTER (WHERE outcome = 'delivered') AS delivered,
+      COUNT(*) FILTER (WHERE outcome = 'returned') AS returned FROM (
+        SELECT phone, status AS outcome FROM orders WHERE phone IN (${marks})
+        UNION ALL SELECT phone, outcome FROM customer_history WHERE phone IN (${marks})) h
+      GROUP BY phone`, ...phones, ...phones) : [];
     const byPhone = new Map(history.map((h) => [h.phone, h]));
     for (const o of rows) {
       const h = byPhone.get(o.phone);

@@ -74,7 +74,12 @@ export const ecotrack = {
     const data = await call(company, 'GET', 'get/orders', { start_date: day(start), end_date: day(end), page }, 50_000);
     const rows = Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
     return {
-      parcels: rows.map((r) => ({ tracking: r.tracking, products: r.products ?? r.produit ?? '' })),
+      parcels: rows.map((r) => {
+        // global_status: livre (delivered), retour (returned), en_process (on its way).
+        const g = String(r.global_status ?? r.status ?? '');
+        const outcome = /^livr/i.test(g) ? 'delivered' : /^retour/i.test(g) ? 'returned' : null;
+        return { tracking: r.tracking, products: r.products ?? r.produit ?? '', phone: r.phone ?? r.telephone ?? r.mobile ?? null, outcome };
+      }),
       last_page: Number(data.last_page || data.meta?.last_page || 1),
     };
   },
