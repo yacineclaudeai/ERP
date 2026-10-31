@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { Hono } from 'hono';
 import { getSetting, setSetting } from '../db.js';
 import {
-  hashPassword, verifyPassword, setSession, clearSession, authMiddleware, requireAdmin, requirePerm, can, publicUser, parsePermissions, parseIds, PERMISSIONS,
+  hashPassword, verifyPassword, setSession, clearSession, authMiddleware, requireAdmin, requirePerm, can, publicUser, parsePermissions, parseIds, PERMISSIONS, PERMISSION_GROUPS,
 } from '../auth.js';
 import { WILAYAS, isValidWilaya } from '../wilayas.js';
 import { PROVIDER_NAMES } from '../delivery/index.js';
@@ -99,7 +99,7 @@ export function apiRouter(db) {
     ad_creative_folder: b.ad_creative_folder ? String(b.ad_creative_folder).trim() : null,
   });
 
-  r.post('/products', requirePerm('products'), async (c) => {
+  r.post('/products', requirePerm('products.edit'), async (c) => {
     const f = productFields(body(c));
     if (!f.name) throw new HttpError(400, 'اسم المنتج ضروري');
     // A new product is a test until the user moves it to a real store.
@@ -120,7 +120,7 @@ export function apiRouter(db) {
 
   r.post('/products/merge-variants', requireAdmin, async (c) => c.json(await mergeVariantProducts(db)));
 
-  r.put('/products/:id', requirePerm('products'), async (c) => {
+  r.put('/products/:id', requirePerm('products.edit'), async (c) => {
     const id = idParam(c);
     const b = body(c);
     const f = productFields(b);
@@ -140,7 +140,7 @@ export function apiRouter(db) {
   // Move a product to a store (branch) and/or delivery company from the orders
   // table; its open orders follow.
   // A product with orders can't go (the orders need it): it can be stopped instead.
-  r.delete('/products/:id', requirePerm('products'), async (c) => {
+  r.delete('/products/:id', requirePerm('products.delete'), async (c) => {
     const id = idParam(c);
     const used = await db.get(`SELECT (SELECT count(*) FROM orders WHERE product_id = ?)::int
       + (SELECT count(*) FROM order_items WHERE product_id = ?)::int AS n`, id, id);
@@ -149,12 +149,12 @@ export function apiRouter(db) {
     if (!rows.length) throw new HttpError(404, 'المنتج غير موجود');
     return c.json({ ok: true });
   });
-  r.put('/products/:id/archive', requirePerm('products'), async (c) => {
+  r.put('/products/:id/archive', requirePerm('products.delete'), async (c) => {
     const { rows } = await db.run('UPDATE products SET archived = ? WHERE id = ? RETURNING id', Boolean(body(c).archived), idParam(c));
     if (!rows.length) throw new HttpError(404, 'المنتج غير موجود');
     return c.json({ ok: true });
   });
-  r.put('/products/:id/store', requirePerm('products'), async (c) => {
+  r.put('/products/:id/store', requirePerm('products.edit'), async (c) => {
     const id = idParam(c);
     const b = body(c);
     if (!await db.get('SELECT id FROM products WHERE id = ?', id)) throw new HttpError(404, 'المنتج غير موجود');
@@ -180,7 +180,7 @@ export function apiRouter(db) {
   });
 
   // Link products to stores from the parcels each store already shipped.
-  r.post('/branches/scan', requirePerm('products'), async (c) => {
+  r.post('/branches/scan', requirePerm('products.edit'), async (c) => {
     const b = body(c);
     return c.json(await scanStore(db, Number(b.store_id), Math.max(1, Number(b.page) || 1)));
   });
@@ -190,16 +190,16 @@ export function apiRouter(db) {
     const b = body(c);
     return c.json(await importHistoryPage(db, Number(b.store_id), Number(b.company_id), Math.max(1, Number(b.page) || 1)));
   });
-  r.post('/branches/apply', requirePerm('products'), async (c) => c.json(await applyStoreLinks(db, body(c).texts)));
+  r.post('/branches/apply', requirePerm('products.edit'), async (c) => c.json(await applyStoreLinks(db, body(c).texts)));
 
-  r.post('/products/:id/regenerate-key', requirePerm('products'), async (c) => {
+  r.post('/products/:id/regenerate-key', requirePerm('products.edit'), async (c) => {
     const { rows: [p] } = await db.run('UPDATE products SET public_key = ? WHERE id = ? RETURNING *', newKey(), idParam(c));
     if (!p) throw new HttpError(404, 'المنتج غير موجود');
     return c.json(p);
   });
 
   // Stock in (new purchase) or correction. quantity may be negative.
-  r.post('/products/:id/stock', requirePerm('products'), async (c) => {
+  r.post('/products/:id/stock', requirePerm('products.stock'), async (c) => {
     const id = idParam(c);
     const qty = Math.floor(Number(body(c).quantity));
     if (!qty) throw new HttpError(400, 'الكمية ضرورية');
@@ -221,7 +221,12 @@ export function apiRouter(db) {
   // Orders: the confirmation page and the tracking page each need their own permission.
   const CONFIRM_STATUSES = ['new', 'no_answer', 'postponed', 'cancelled', 'fake'];
   const TRACKING_STATUSES = ['confirmed', 'dispatched', 'delivered', 'returned'];
-  const TRACKING_ACTIONS = ['delivered', 'returned', 'return_received'];
+  // The permission each order action needs (cancel depends on the stage: see below).
+  const ACTION_PERMS = {
+    confirm: 'confirm.confirm', no_answer: 'confirm.fail', postpone: 'confirm.fail', reset: 'confirm.fail',
+    set_failed: 'confirm.fail', unfail: 'confirm.fail', reopen: 'confirm.cancel',
+    delivered: 'tracking.delivered', returned: 'tracking.returned', return_received: 'tracking.returned',
+  };
   const ordersAccess = requirePerm('confirm', 'tracking');
   const FAILED_RE = /^failed_([1-5])$/;
   const FAILED_N = (alias) => `LEAST(5, GREATEST(1, ${alias}.call_attempts))`;
@@ -229,16 +234,17 @@ export function apiRouter(db) {
     ...(can(user, 'confirm') ? CONFIRM_STATUSES : []), ...(can(user, 'tracking') ? TRACKING_STATUSES : []),
   ];
   // A non-admin sees, at the confirmation stage, only the orders given to them.
-  const mineOnly = (user, alias = 'o') => (user.role === 'admin' ? null : {
+  const mineOnly = (user, alias = 'o') => (can(user, 'confirm.all') ? null : {
     sql: `(${alias}.status NOT IN (${CONFIRM_STATUSES.map(() => '?').join(',')}) OR ${alias}.assigned_to = ?)`,
     args: [...CONFIRM_STATUSES, user.id],
   });
   const checkOrderAccess = async (user, id) => {
     const order = await getOrder(db, id);
     if (!allowedStatuses(user).includes(order.status)) throw new HttpError(403, 'ما عندكش الصلاحية على هاد الطلبية');
-    if (user.role !== 'admin' && CONFIRM_STATUSES.includes(order.status) && order.assigned_to !== user.id) {
+    if (!can(user, 'confirm.all') && CONFIRM_STATUSES.includes(order.status) && order.assigned_to !== user.id) {
       throw new HttpError(403, 'هاد الطلبية ماشي تاعك');
     }
+    return order;
   };
 
   r.get('/orders', ordersAccess, async (c) => {
@@ -327,7 +333,7 @@ export function apiRouter(db) {
   });
 
   // The admin gives orders to a confirmation agent (as_new: start them again as new orders).
-  r.post('/orders/assign', requireAdmin, async (c) => {
+  r.post('/orders/assign', requirePerm('confirm.assign'), async (c) => {
     const b = body(c);
     const ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter((n) => n > 0);
     if (!ids.length) throw new HttpError(400, 'ما اخترت حتى طلبية');
@@ -379,56 +385,75 @@ export function apiRouter(db) {
     return c.json({ ...order, events });
   });
 
-  r.post('/orders', requirePerm('confirm'), async (c) => {
+  r.post('/orders', requirePerm('confirm.add'), async (c) => {
     const user = c.get('user');
     const order = await createOrder(db, body(c), { source: 'manual', userId: user.id });
     // An agent's own manual order is theirs to confirm.
-    if (user.role !== 'admin') await db.run('UPDATE orders SET assigned_to = ? WHERE id = ?', user.id, order.id);
+    if (!can(user, 'confirm.all')) await db.run('UPDATE orders SET assigned_to = ? WHERE id = ?', user.id, order.id);
     return c.json(await getOrder(db, order.id), 201);
   });
 
 
-  r.delete('/orders/:id', requireAdmin, async (c) => c.json(await deleteOrder(db, idParam(c))));
+  r.delete('/orders/:id', requirePerm('confirm.delete'), async (c) => {
+    await checkOrderAccess(c.get('user'), idParam(c));
+    return c.json(await deleteOrder(db, idParam(c)));
+  });
 
   r.put('/orders/:id', ordersAccess, async (c) => {
-    await checkOrderAccess(c.get('user'), idParam(c));
+    const user = c.get('user');
+    const current = await checkOrderAccess(user, idParam(c));
     // Only the admin changes the main product of an order (the others can add products).
     const b = body(c);
-    if (c.get('user').role !== 'admin' && b.product_id != null && b.product_id !== '') {
-      const current = await db.get('SELECT product_id FROM orders WHERE id = ?', idParam(c));
-      if (Number(b.product_id) !== current?.product_id) throw new HttpError(403, 'المدير برك يبدل المنتج الرئيسي');
+    if (user.role !== 'admin' && b.product_id != null && b.product_id !== '' && Number(b.product_id) !== current.product_id) {
+      throw new HttpError(403, 'المدير برك يبدل المنتج الرئيسي');
     }
+    // Each changed field needs its permission: a confirmed order needs "tracking.edit".
+    const same = (x, y) => (x !== '' && y !== '' && Number.isFinite(Number(x)) && Number.isFinite(Number(y))
+      ? Number(x) === Number(y) : String(x ?? '') === String(y ?? ''));
+    const changed = (k) => b[k] !== undefined && (k === 'items' || !same(b[k], current[k]));
+    const confirmStage = CONFIRM_STATUSES.includes(current.status);
+    const needs = !confirmStage ? ['tracking.edit'] : [
+      ...(Object.keys(b).some((k) => !['unit_price', 'delivery_fee', 'company_id'].includes(k) && changed(k)) ? ['confirm.edit'] : []),
+      ...(changed('unit_price') ? ['confirm.price'] : []),
+      ...(changed('delivery_fee') ? ['confirm.delivery_price'] : []),
+      ...(changed('company_id') ? ['confirm.company'] : []),
+    ];
+    const missing = needs.find((p) => !can(user, p));
+    if (missing) throw new HttpError(403, `ما عندكش الصلاحية: ${PERMISSIONS[missing]}`);
     return c.json(await updateOrder(db, idParam(c), b, c.get('user').id));
   });
 
   r.post('/orders/:id/action', ordersAccess, async (c) => {
     const id = idParam(c);
     const b = body(c);
-    if (!can(c.get('user'), TRACKING_ACTIONS.includes(String(b.action)) ? 'tracking' : 'confirm')) {
-      throw new HttpError(403, 'ما عندكش الصلاحية');
-    }
+    const order = await checkOrderAccess(c.get('user'), id);
+    const perm = b.action === 'cancel'
+      ? (CONFIRM_STATUSES.includes(order.status) ? 'confirm.cancel' : 'tracking.cancel')
+      : ACTION_PERMS[String(b.action)];
+    if (!perm || !can(c.get('user'), perm)) throw new HttpError(403, `ما عندكش الصلاحية${perm ? `: ${PERMISSIONS[perm]}` : ''}`);
     const opts = { userId: c.get('user').id, note: b.note || null, attempts: b.attempts ?? null };
     return c.json(b.action === 'confirm'
       ? await confirmAndDispatch(db, id, opts)
       : await applyAction(db, id, String(b.action), opts));
   });
 
-  r.post('/orders/:id/back', requirePerm('tracking'), async (c) => {
+  r.post('/orders/:id/back', requirePerm('tracking.back', 'tracking.back_dispatched'), async (c) => {
     const id = idParam(c);
-    // Removing a parcel at the delivery company is for admins only.
-    if ((await getOrder(db, id)).status === 'dispatched' && c.get('user').role !== 'admin') {
-      throw new HttpError(403, 'غير المدير يرجّع طلبية راهي عند التوصيل');
+    // Removing a parcel at the delivery company needs its own permission.
+    const dispatched = (await getOrder(db, id)).status === 'dispatched';
+    if (!can(c.get('user'), dispatched ? 'tracking.back_dispatched' : 'tracking.back')) {
+      throw new HttpError(403, `ما عندكش الصلاحية: ${PERMISSIONS[dispatched ? 'tracking.back_dispatched' : 'tracking.back']}`);
     }
     return c.json(await backToConfirmation(db, id, { userId: c.get('user').id }));
   });
 
   // Retry a failed dispatch, or record a tracking number by hand.
-  r.post('/orders/:id/dispatch', requirePerm('tracking'), async (c) => c.json(await dispatchOrder(db, idParam(c), {
+  r.post('/orders/:id/dispatch', requirePerm('tracking.dispatch'), async (c) => c.json(await dispatchOrder(db, idParam(c), {
     userId: c.get('user').id,
     tracking: body(c).tracking ? String(body(c).tracking).trim() : null,
   })));
 
-  r.post('/orders/sync-tracking', requirePerm('tracking'), async (c) => c.json(await syncTracking(db)));
+  r.post('/orders/sync-tracking', requirePerm('tracking.sync'), async (c) => c.json(await syncTracking(db)));
 
   // ---- delivery companies & routing ----
   r.get('/delivery/companies', async (c) => {
@@ -768,6 +793,7 @@ export function apiRouter(db) {
     users: (await db.all('SELECT id, username, role, permissions, accounting_store_ids, created_at FROM users ORDER BY id'))
       .map((u) => ({ ...publicUser(u), created_at: u.created_at })),
     permissions: PERMISSIONS,
+    groups: PERMISSION_GROUPS,
   }));
 
   r.post('/users', requireAdmin, async (c) => {

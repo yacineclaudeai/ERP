@@ -306,3 +306,12 @@ a { color: #0b4f22; font-weight: 800; }
 .cust-check.warn { border-color: #f59e0b; background: #fffbeb; }
 .cust-check.bad { border-color: #dc2626; background: #fef2f2; }
 a.btn { text-decoration: none; display: inline-block; }
+
+/* Users page: one box per page with its actions, like Ecotrack's employee roles. */
+.perm-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.perm-group { border: 1px solid var(--line); border-radius: 10px; background: #fff; overflow: hidden; }
+.perm-head { background: #f1f5f9; padding: 8px 10px; font-weight: 700; border-bottom: 1px solid var(--line); }
+.perm-list { padding: 8px 10px; display: grid; gap: 4px; }
+.perm-list label.check { font-size: 14px; }
+.perm-list .perm-view { font-weight: 700; }
+.modal-box:has(.perm-groups) { max-width: 1100px; }
