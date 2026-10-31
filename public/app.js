@@ -497,7 +497,6 @@ async function ordersPage(mode = 'confirm') {
       <label class="check">الفاشلة تتحول وحدها لـ"المؤكدة 2" ومن بعد "المؤكدة 3" تاع المنتج (تختارهم في صفحة المنتجات) بعد كل
         <input id="auto-transfer" type="number" min="0" max="20" value="${team.auto_transfer_after}" style="width:60px"> فاشلات (مثلا 2: بعد الفاشلة 2 والفاشلة 4) — 0 = لا</label>
       ${team.agents.length ? '' : '<span class="neg">مازال ما زدت حتى مؤكدة (صفحة المستخدمين)</span>'}</div>` : ''}
-    <div class="top-scroll" id="top-scroll"><div></div></div>
     <div class="table-wrap orders-wrap" id="orders-wrap"><table class="orders">
       <thead><tr>
         <th><input type="checkbox" id="check-all"></th>
@@ -524,7 +523,6 @@ async function ordersPage(mode = 'confirm') {
         ${page < pages ? `<button class="btn small" data-page="${page + 1}">التالية ›</button>` : ''}</span>
       <label class="muted">في الصفحة <select id="page-size">${PAGE_SIZES.map((n) => `<option ${n === pageSize() ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>`);
   bindOrderTable(main.querySelector('table.orders'), list.rows, products, companies, stores);
-  syncTopScroll(main.querySelector('#top-scroll'), main.querySelector('#orders-wrap'));
 
   main.querySelectorAll('[data-status]').forEach((b) => (b.onclick = () => go({ status: b.dataset.status })));
   main.querySelectorAll('[data-filter]').forEach((s) => (s.onchange = () => go({ [s.dataset.filter]: s.value })));
@@ -610,11 +608,17 @@ async function ordersPage(mode = 'confirm') {
   });
 }
 
-// A second horizontal scrollbar above the table, kept in step with the one below.
-function syncTopScroll(top, wrap) {
+// Every table gets a second horizontal scrollbar above it, kept in step with the one below.
+function syncTopScroll(wrap) {
+  wrap.dataset.scroll = '1';
+  const top = document.createElement('div');
+  top.className = 'top-scroll';
+  top.innerHTML = '<div></div>';
+  wrap.before(top);
   const fit = () => {
     top.firstElementChild.style.width = `${wrap.scrollWidth}px`;
     top.classList.toggle('hidden', wrap.scrollWidth <= wrap.clientWidth);
+    top.scrollLeft = wrap.scrollLeft;
   };
   let busy = false;
   const mirror = (from, to) => () => {
@@ -623,11 +627,15 @@ function syncTopScroll(top, wrap) {
     to.scrollLeft = from.scrollLeft;
     requestAnimationFrame(() => (busy = false));
   };
-  top.onscroll = mirror(top, wrap);
-  wrap.onscroll = mirror(wrap, top);
+  top.addEventListener('scroll', mirror(top, wrap));
+  wrap.addEventListener('scroll', mirror(wrap, top));
   fit();
-  new ResizeObserver(fit).observe(wrap);
+  const ro = new ResizeObserver(fit);
+  ro.observe(wrap);
+  if (wrap.firstElementChild) ro.observe(wrap.firstElementChild);
 }
+new MutationObserver(() => app.querySelectorAll('.table-wrap:not([data-scroll])').forEach(syncTopScroll))
+  .observe(app, { childList: true, subtree: true });
 
 const EDITABLE = ['new', 'no_answer', 'postponed', 'confirmed'];
 // Status choices offered in the table for each current status, and the
@@ -1116,7 +1124,6 @@ async function accountingPage() {
         <td class="num">${x.in_hand}</td><td class="num">${money(x.left_value)}</td>
         <td class="num">${x.returning}</td><td class="num">${money(x.returning_value)}</td></tr>`).join('')}
     </table></div></div>` : ''}
-    <div class="top-scroll" id="top-scroll"><div></div></div>
     <div class="table-wrap orders-wrap" id="products-wrap"><table>
       <tr><th>المنتج</th><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الوضعية</th><th>مشرية</th><th>عندي</th><th>قيمة الباقي</th><th>عند التوصيل</th><th>تليفرات</th><th>روتور جاي</th><th>ناقص</th><th></th></tr>
       ${products.map((p) => `<tr>
@@ -1339,7 +1346,6 @@ async function productsPage() {
     refresh();
   }));
   if (saveAll) saveAll.onclick = guard(() => saveRows([...main.querySelectorAll('tr.dirty')]));
-  syncTopScroll(main.querySelector('#top-scroll'), main.querySelector('#products-wrap'));
   main.querySelectorAll('[data-del-product]').forEach((b) => (b.onclick = guard(async () => {
     const p = products.find((x) => x.id === Number(b.dataset.delProduct));
     if (!confirm(`حذف "${p.name}"؟ ما يرجعش.`)) return;

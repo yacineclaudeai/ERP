@@ -177,8 +177,13 @@ td.acts button.dark .ic { width: 13px; height: 13px; }
 .bulk { display: flex; gap: 8px; align-items: center; background: #fef3c7; border-radius: 10px; padding: 8px 12px; margin-bottom: 8px; }
 .bulk.hidden { display: none; }
 .bulk select { width: auto; }
-.top-scroll { overflow-x: auto; overflow-y: hidden; height: 14px; margin-bottom: 4px; }
+.top-scroll { overflow-x: scroll; overflow-y: hidden; height: 16px; margin-bottom: 4px; }
 .top-scroll > div { height: 1px; }
+/* Sideways scrollbars above and below tables: thick and always shown, also on phones and Mac. */
+.top-scroll, .table-wrap { scrollbar-width: auto; scrollbar-color: var(--brand-dark) #e2e8f0; }
+.top-scroll::-webkit-scrollbar, .table-wrap::-webkit-scrollbar { height: 14px; width: 12px; }
+.top-scroll::-webkit-scrollbar-track, .table-wrap::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 8px; }
+.top-scroll::-webkit-scrollbar-thumb, .table-wrap::-webkit-scrollbar-thumb { background: var(--brand-dark); border-radius: 8px; border: 2px solid #e2e8f0; }
 
 /* Products page: a row with unsaved store/company changes */
 tr.dirty td { background: #fef9c3; }
