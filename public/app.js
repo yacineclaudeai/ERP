@@ -421,7 +421,11 @@ async function statsPage() {
 }
 
 // ---------- orders ----------
-const PAGE_SIZE = 50;
+const PAGE_SIZES = [50, 100, 200, 300];
+// How many orders per page, remembered in this browser.
+const pageSize = () => {
+  try { return PAGE_SIZES.includes(Number(localStorage.getItem('erp_page_size'))) ? Number(localStorage.getItem('erp_page_size')) : 50; } catch { return 50; }
+};
 const ORDER_FILTERS = ['status', 'q', 'product_id', 'store_id', 'wilaya', 'company_id', 'source', 'stop_desk', 'assigned_to', 'page'];
 
 // Two pages on the same table: confirmation (orders still to call) and
@@ -443,7 +447,7 @@ async function ordersPage(mode = 'confirm') {
   // The admin gives confirmation orders to agents.
   const assigning = mode === 'confirm' && isAdminUser();
   const [list, products, stats, stores, companies, team] = await Promise.all([
-    api('GET', `/orders?${new URLSearchParams({ ...query, status: f.status, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE })}`),
+    api('GET', `/orders?${new URLSearchParams({ ...query, status: f.status, limit: pageSize(), offset: (page - 1) * pageSize() })}`),
     api('GET', '/products'),
     api('GET', '/orders/counts'),
     api('GET', '/stores'),
@@ -462,8 +466,8 @@ async function ordersPage(mode = 'confirm') {
   const hfilter = (label, key, options) => `<th class="hf"><select data-filter="${key}" class="${f[key] ? 'on' : ''}">
       <option value="">${label}</option>
       ${options.map(([v, l]) => `<option value="${v}" ${String(v) === f[key] ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></th>`;
-  const from = list.total ? (page - 1) * PAGE_SIZE + 1 : 0;
-  const pages = Math.max(1, Math.ceil(list.total / PAGE_SIZE));
+  const from = list.total ? (page - 1) * pageSize() + 1 : 0;
+  const pages = Math.max(1, Math.ceil(list.total / pageSize()));
 
   const main = shell(`
     <h2>${P.title}</h2>
@@ -516,13 +520,20 @@ async function ordersPage(mode = 'confirm') {
     <div class="pager"><span class="muted">${from}-${from ? from + list.rows.length - 1 : 0} من ${list.total}</span>
       <span>${page > 1 ? `<button class="btn small" data-page="${page - 1}">‹ السابقة</button>` : ''}
         <span class="page-n">${page} / ${pages}</span>
-        ${page < pages ? `<button class="btn small" data-page="${page + 1}">التالية ›</button>` : ''}</span></div>`);
+        ${page < pages ? `<button class="btn small" data-page="${page + 1}">التالية ›</button>` : ''}</span>
+      <label class="muted">في الصفحة <select id="page-size">${PAGE_SIZES.map((n) => `<option ${n === pageSize() ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>`);
   bindOrderTable(main.querySelector('table.orders'), list.rows, products, companies, stores);
   syncTopScroll(main.querySelector('#top-scroll'), main.querySelector('#orders-wrap'));
 
   main.querySelectorAll('[data-status]').forEach((b) => (b.onclick = () => go({ status: b.dataset.status })));
   main.querySelectorAll('[data-filter]').forEach((s) => (s.onchange = () => go({ [s.dataset.filter]: s.value })));
   main.querySelectorAll('[data-page]').forEach((b) => (b.onclick = () => go({ page: b.dataset.page })));
+  main.querySelector('#page-size').onchange = (e) => {
+    try { localStorage.setItem('erp_page_size', e.target.value); } catch { /* private window: keeps 50 */ }
+    const before = location.hash;
+    go({ page: '' });
+    if (location.hash === before) router();
+  };
   main.querySelector('#filters').onsubmit = (e) => {
     e.preventDefault();
     go({ q: e.target.elements.q.value });
