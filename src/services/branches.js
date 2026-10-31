@@ -19,19 +19,33 @@ export const normalizeName = (v) => String(v ?? '')
   .trim();
 
 // Product → store, from the parcel texts of each store: { storeId: [text, ...] }.
+// A parcel counts only for the most specific product it names ("pack pyjama 3
+// pieces robe" counts for that pack, not for "pyjama 3 pieces" too).
 // A product goes to the store whose parcels name it most, if that store clearly
 // leads (twice the runner-up), so one stray parcel doesn't move a product.
 export function matchProducts(products, textsByStore) {
+  const keyed = products
+    .map((p) => ({ p, keys: [normalizeName(p.name), normalizeName(p.sku)].filter((k) => k.length >= 3) }))
+    .filter((x) => x.keys.length);
+  const counts = new Map();
+  for (const [storeId, texts] of Object.entries(textsByStore)) {
+    for (const t of texts) {
+      const hits = keyed
+        .map((x) => [x.p.id, Math.max(0, ...x.keys.filter((k) => ` ${t} `.includes(` ${k} `)).map((k) => k.length))])
+        .filter(([, len]) => len > 0);
+      const best = Math.max(0, ...hits.map(([, len]) => len));
+      for (const [id, len] of hits) {
+        if (len < best) continue;
+        const byStore = counts.get(id) || counts.set(id, new Map()).get(id);
+        byStore.set(Number(storeId), (byStore.get(Number(storeId)) || 0) + 1);
+      }
+    }
+  }
   const result = [];
-  for (const p of products) {
-    const keys = [normalizeName(p.name), normalizeName(p.sku)].filter((k) => k.length >= 3);
-    if (!keys.length) continue;
-    const counts = Object.entries(textsByStore)
-      .map(([storeId, texts]) => [Number(storeId), texts.filter((t) => keys.some((k) => ` ${t} `.includes(` ${k} `))).length])
-      .filter(([, n]) => n > 0)
-      .sort((a, b) => b[1] - a[1]);
-    if (!counts.length) continue;
-    const [[storeId, n], second] = counts;
+  for (const { p } of keyed) {
+    const ranked = [...(counts.get(p.id) || [])].sort((a, b) => b[1] - a[1]);
+    if (!ranked.length) continue;
+    const [[storeId, n], second] = ranked;
     if (second && n < second[1] * 2) continue;
     result.push({ product_id: p.id, store_id: storeId, parcels: n });
   }
@@ -69,6 +83,9 @@ export async function applyStoreLinks(db, textsByStore) {
   for (const m of matches) {
     const p = byId.get(m.product_id);
     if (p.store_id === m.store_id) continue;
+    // A store whose parcels we couldn't read (My Ecom, no token...) can't compete:
+    // its products stay where they are.
+    if (p.store_id && !(String(p.store_id) in clean)) continue;
     await db.run('UPDATE products SET store_id = ? WHERE id = ?', m.store_id, p.id);
     const orders = await rerouteProductOrders(db, p.id);
     linked.push({ product: p.name, from: stores.get(p.store_id) || null, to: stores.get(m.store_id), parcels: m.parcels, orders });

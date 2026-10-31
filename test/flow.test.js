@@ -1068,3 +1068,20 @@ test('customer check: old parcels read from Ecotrack count too, once', async () 
   const [o] = (await api('GET', '/api/orders?q=0551990099')).body.rows;
   assert.deepEqual([o.delivered_count, o.returned_count], [1, 1]);
 });
+
+test('branch linking: a parcel counts for the most specific product, unread stores keep their products', async () => {
+  const { matchProducts } = await import('../src/services/branches.js');
+  const products = [{ id: 1, name: 'Pyjama 3 pièces' }, { id: 2, name: 'Pack pyjama 3 pieces + robe nemri' }];
+  const texts = { 10: ['pack pyjama 3 pieces robe nemri', 'pack pyjama 3 pieces robe nemri'], 20: ['pyjama 3 pieces'] };
+  const m = Object.fromEntries(matchProducts(products, texts).map((x) => [x.product_id, x.store_id]));
+  assert.equal(m[1], 20);
+  assert.equal(m[2], 10);
+
+  const stores = await db.all('SELECT id FROM stores ORDER BY id LIMIT 2');
+  assert.equal(stores.length, 2);
+  const [a, b] = stores.map((s) => s.id);
+  const { id } = await db.get("INSERT INTO products (name, price, store_id, public_key) VALUES ('Robe unread store', 1000, ?, 'unread-test') RETURNING id", a);
+  const r = await api('POST', '/api/branches/apply', { texts: { [b]: ['robe unread store'] } });
+  assert.equal(r.status, 200);
+  assert.equal((await db.get('SELECT store_id FROM products WHERE id = ?', id)).store_id, a);
+});
