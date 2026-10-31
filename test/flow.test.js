@@ -1184,3 +1184,14 @@ test('scheduled catch-up: the latest LightFunnels orders whose webhook never cam
     delete process.env.LF_CLIENT_SECRET;
   }
 });
+
+test('a product without orders can be deleted; one with orders is refused', async () => {
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const empty = (await api('POST', '/api/products', { name: 'Produit vide', price: 100 })).body;
+  const used = (await api('POST', '/api/products', { name: 'Produit utilisé', price: 100, stock: 3 })).body;
+  await api('POST', '/api/orders', { product_id: used.id, customer_name: 'D', phone: '0551990099', wilaya_code: 16 });
+  assert.equal((await api('DELETE', `/api/products/${used.id}`)).status, 409);
+  assert.equal((await api('DELETE', `/api/products/${empty.id}`)).status, 200);
+  const names = (await api('GET', '/api/products')).body.map((p) => p.name);
+  assert.ok(!names.includes('Produit vide') && names.includes('Produit utilisé'));
+});
