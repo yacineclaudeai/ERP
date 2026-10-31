@@ -294,3 +294,9 @@ a { color: #0b4f22; font-weight: 800; }
 /* Long product names: at most 2 lines, the full name shows on hover. */
 .prod-cell .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .extra-items { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Customer check next to the phone: delivered / returned orders of this phone. */
+.cust-check { display: inline-block; margin-inline-start: 6px; padding: 1px 8px; border-radius: 12px; border: 1px solid #cbd5e1; font-size: 12px; font-weight: 700; background: #fff; white-space: nowrap; }
+.cust-check.good { border-color: #16a34a; background: #f0fdf4; }
+.cust-check.warn { border-color: #f59e0b; background: #fffbeb; }
+.cust-check.bad { border-color: #dc2626; background: #fef2f2; }
