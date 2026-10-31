@@ -5,6 +5,11 @@ import { openLocalDb } from '../src/db-local.js';
 import { createApp } from '../src/app.js';
 import { normalizePhone } from '../src/services/orders.js';
 import { mapEcotrackStatus } from '../src/delivery/ecotrack.js';
+import { PERMISSIONS } from '../src/auth.js';
+
+// A page with all its actions, as accounts had them before the per-action boxes (admin-only ones left out).
+const ADMIN_ONLY = ['confirm.all', 'confirm.delete', 'confirm.assign', 'tracking.back_dispatched'];
+const full = (...pages) => Object.keys(PERMISSIONS).filter((p) => pages.includes(p.split('.')[0]) && !ADMIN_ONLY.includes(p));
 
 let server, base, db, cookie = '';
 
@@ -225,7 +230,7 @@ test('automation token opens only the ads routes', async () => {
 test('a confirmation agent edits an order from the table, product included', async () => {
   const a = (await api('POST', '/api/products', { name: 'Parfum A', price: 2500, stock: 5 })).body;
   const b = (await api('POST', '/api/products', { name: 'Parfum B', price: 3000, stock: 5 })).body;
-  await api('POST', '/api/users', { username: 'agent1', password: 'agent123', role: 'agent', permissions: ['confirm', 'tracking'] });
+  await api('POST', '/api/users', { username: 'agent1', password: 'agent123', role: 'agent', permissions: full('confirm', 'tracking') });
   const o = (await api('POST', '/api/orders', { product_id: a.id, customer_name: 'Test', phone: '0550001122', wilaya_code: 16 })).body;
   const agent = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'agent1');
   await api('POST', '/api/orders/assign', { ids: [o.id], user_id: agent.id });
@@ -604,16 +609,16 @@ test('each account sees only the pages ticked for it', async () => {
   const p = (await api('POST', '/api/products', { name: 'Perm item', price: 1000, stock: 5 })).body;
   const o = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'P', phone: '0551550101', wilaya_code: 16 })).body;
   assert.equal((await api('POST', '/api/users', { username: 'empty', password: 'secret1', role: 'agent', permissions: [] })).status, 400);
-  assert.equal((await api('POST', '/api/users', { username: 'conf', password: 'secret1', role: 'agent', permissions: ['confirm', 'nonsense'] })).status, 201);
-  await api('POST', '/api/users', { username: 'suivi', password: 'secret1', role: 'agent', permissions: ['tracking'] });
-  await api('POST', '/api/users', { username: 'compta', password: 'secret1', role: 'agent', permissions: ['accounting', 'stats'] });
+  assert.equal((await api('POST', '/api/users', { username: 'conf', password: 'secret1', role: 'agent', permissions: [...full('confirm'), 'nonsense'] })).status, 201);
+  await api('POST', '/api/users', { username: 'suivi', password: 'secret1', role: 'agent', permissions: full('tracking') });
+  await api('POST', '/api/users', { username: 'compta', password: 'secret1', role: 'agent', permissions: full('accounting', 'stats') });
   const users = (await api('GET', '/api/users')).body.users;
-  assert.deepEqual(users.find((u) => u.username === 'conf').permissions, ['confirm']);
+  assert.deepEqual(users.find((u) => u.username === 'conf').permissions, full('confirm'));
   await api('POST', '/api/orders/assign', { ids: [o.id], user_id: users.find((u) => u.username === 'conf').id });
 
   const as = async (username) => api('POST', '/api/auth/login', { username, password: 'secret1' });
   await as('conf');
-  assert.deepEqual((await api('GET', '/api/auth/me')).body.permissions, ['confirm']);
+  assert.deepEqual((await api('GET', '/api/auth/me')).body.permissions, full('confirm'));
   assert.ok((await api('GET', '/api/orders?status=new')).body.rows.some((x) => x.id === o.id));
   assert.equal((await api('GET', '/api/orders?status=delivered')).body.total, 0, 'tracking orders stay hidden');
   assert.equal((await api('GET', '/api/accounting')).status, 403);
@@ -635,8 +640,8 @@ test('each account sees only the pages ticked for it', async () => {
 
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
   const conf = users.find((u) => u.username === 'conf');
-  await api('PUT', `/api/users/${conf.id}/permissions`, { role: 'agent', permissions: ['confirm', 'stats'] });
-  assert.deepEqual((await api('GET', '/api/users')).body.users.find((u) => u.id === conf.id).permissions, ['confirm', 'stats']);
+  await api('PUT', `/api/users/${conf.id}/permissions`, { role: 'agent', permissions: full('confirm', 'stats') });
+  assert.deepEqual((await api('GET', '/api/users')).body.users.find((u) => u.id === conf.id).permissions, full('confirm', 'stats'));
 });
 
 test('one order, several products in one parcel', async () => {
@@ -692,7 +697,7 @@ test('an accountant sees the profit of the stores ticked for them only', async (
   const p1 = (await api('POST', '/api/products', { name: 'Compta P1', price: 100, store_id: s1.id })).body;
   const p2 = (await api('POST', '/api/products', { name: 'Compta P2', price: 100, store_id: s2.id })).body;
   assert.equal((await api('POST', '/api/users', {
-    username: 'compta1', password: 'secret1', role: 'agent', permissions: ['accounting'], accounting_store_ids: [s1.id],
+    username: 'compta1', password: 'secret1', role: 'agent', permissions: full('accounting'), accounting_store_ids: [s1.id],
   })).status, 201);
   const u = (await api('GET', '/api/users')).body.users.find((x) => x.username === 'compta1');
   assert.deepEqual(u.accounting_store_ids, [s1.id]);
@@ -707,7 +712,7 @@ test('an accountant sees the profit of the stores ticked for them only', async (
   assert.equal((await api('PUT', '/api/accounting/defaults', { confirmation: 1 })).status, 403);
 
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
-  await api('PUT', `/api/users/${u.id}/permissions`, { role: 'agent', permissions: ['accounting'], accounting_store_ids: [] });
+  await api('PUT', `/api/users/${u.id}/permissions`, { role: 'agent', permissions: full('accounting'), accounting_store_ids: [] });
   await api('POST', '/api/auth/login', { username: 'compta1', password: 'secret1' });
   assert.ok((await api('GET', '/api/accounting')).body.products.some((p) => p.id === p2.id), 'no store ticked = every store');
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
@@ -715,8 +720,8 @@ test('an accountant sees the profit of the stores ticked for them only', async (
 
 test('orders are given to agents; failed twice, they go to the product\'s second agent (still الفاشلة 2)', async () => {
   const p = (await api('POST', '/api/products', { name: 'Assign item', price: 1000, stock: 5 })).body;
-  await api('POST', '/api/users', { username: 'sara', password: 'secret1', role: 'agent', permissions: ['confirm'] });
-  await api('POST', '/api/users', { username: 'amina', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  await api('POST', '/api/users', { username: 'sara', password: 'secret1', role: 'agent', permissions: full('confirm') });
+  await api('POST', '/api/users', { username: 'amina', password: 'secret1', role: 'agent', permissions: full('confirm') });
   const users = (await api('GET', '/api/users')).body.users;
   const sara = users.find((u) => u.username === 'sara');
   const amina = users.find((u) => u.username === 'amina');
@@ -731,7 +736,7 @@ test('orders are given to agents; failed twice, they go to the product\'s second
   await api('POST', '/api/orders/assign', { ids: [o4.id], user_id: null });
   assert.equal((await api('PUT', `/api/products/${p.id}/store`, { backup_agent_id: amina.id })).status, 200);
   // Chain: the order with sara goes to the second agent (amina), then to the third (nour).
-  await api('POST', '/api/users', { username: 'nour', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  await api('POST', '/api/users', { username: 'nour', password: 'secret1', role: 'agent', permissions: full('confirm') });
   const nour = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'nour');
   await api('PUT', `/api/products/${lone.id}/store`, { backup_agent_id: amina.id, third_agent_id: nour.id });
   const o5 = (await api('POST', '/api/orders', { product_id: lone.id, customer_name: 'A', phone: '0551770205', wilaya_code: 16 })).body;
@@ -971,7 +976,7 @@ test('only the admin changes the main product of an order; an agent can add anot
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
   const a = (await api('POST', '/api/products', { name: 'Main one', price: 1000, stock: 5 })).body;
   const b = (await api('POST', '/api/products', { name: 'Other one', price: 700, stock: 5 })).body;
-  await api('POST', '/api/users', { username: 'hamid', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  await api('POST', '/api/users', { username: 'hamid', password: 'secret1', role: 'agent', permissions: full('confirm') });
   const hamid = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'hamid');
   const o = (await api('POST', '/api/orders', { product_id: a.id, customer_name: 'A', phone: '0551880301', wilaya_code: 16 })).body;
   await api('POST', '/api/orders/assign', { ids: [o.id], user_id: hamid.id });
@@ -1010,7 +1015,7 @@ test('LightFunnels options stay out of the product name; old variant products ar
 
 test('security: wrong passwords lock the account, a password change ends old sessions', async () => {
   await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
-  await api('POST', '/api/users', { username: 'locky', password: 'secret1', role: 'agent', permissions: ['confirm'] });
+  await api('POST', '/api/users', { username: 'locky', password: 'secret1', role: 'agent', permissions: full('confirm') });
   for (let i = 0; i < 5; i++) assert.equal((await api('POST', '/api/auth/login', { username: 'locky', password: 'wrong' })).status, 401);
   assert.equal((await api('POST', '/api/auth/login', { username: 'locky', password: 'secret1' })).status, 429, 'locked even with the right password');
   await db.run("UPDATE users SET locked_until = now() - interval '1 minute' WHERE username = 'locky'");
@@ -1245,4 +1250,31 @@ test('My Ecom Delivery: parcel created with KEY/Token headers, commune and stop 
   } finally {
     globalThis.fetch = real;
   }
+});
+
+test('per-action permissions: each order action needs its own box', async () => {
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const p = (await api('POST', '/api/products', { name: 'Perm action item', price: 1000, stock: 5 })).body;
+  await api('POST', '/api/users', { username: 'limited', password: 'secret1', role: 'agent', permissions: ['confirm', 'confirm.edit', 'confirm.add'] });
+  const o = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'L', phone: '0551880101', wilaya_code: 16 })).body;
+  const other = (await api('POST', '/api/orders', { product_id: p.id, customer_name: 'L2', phone: '0551880102', wilaya_code: 16 })).body;
+  const limited = (await api('GET', '/api/users')).body.users.find((u) => u.username === 'limited');
+  await api('POST', '/api/orders/assign', { ids: [o.id], user_id: limited.id });
+
+  await api('POST', '/api/auth/login', { username: 'limited', password: 'secret1' });
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { commune: 'Kouba' })).status, 200);
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { unit_price: 500 })).status, 403, 'price needs confirm.price');
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { unit_price: 1000, commune: 'Kouba' })).status, 200, 'unchanged price is fine');
+  assert.equal((await api('POST', `/api/orders/${o.id}/action`, { action: 'cancel' })).status, 403);
+  assert.equal((await api('POST', `/api/orders/${o.id}/action`, { action: 'confirm' })).status, 403);
+  assert.equal((await api('DELETE', `/api/orders/${o.id}`)).status, 403);
+  assert.equal((await api('GET', `/api/orders/${other.id}`)).status, 403, 'not hers');
+
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  await api('PUT', `/api/users/${limited.id}/permissions`, { role: 'agent', permissions: ['confirm', 'confirm.all', 'confirm.delete', 'confirm.price'] });
+  await api('POST', '/api/auth/login', { username: 'limited', password: 'secret1' });
+  assert.equal((await api('GET', `/api/orders/${other.id}`)).status, 200, 'confirm.all sees every order');
+  assert.equal((await api('PUT', `/api/orders/${o.id}`, { unit_price: 900 })).status, 200);
+  assert.equal((await api('DELETE', `/api/orders/${other.id}`)).status, 200);
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
 });

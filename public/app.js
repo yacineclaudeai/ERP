@@ -446,7 +446,7 @@ async function ordersPage(mode = 'confirm') {
   const page = Math.max(1, Number(f.page) || 1);
   const query = Object.fromEntries(Object.entries({ ...f, page: '' }).filter(([, v]) => v !== ''));
   // The admin gives confirmation orders to agents.
-  const assigning = mode === 'confirm' && isAdminUser();
+  const assigning = mode === 'confirm' && can('confirm.assign');
   const [list, products, stats, stores, companies, team] = await Promise.all([
     api('GET', `/orders?${new URLSearchParams({ ...query, status: f.status, limit: pageSize(), offset: (page - 1) * pageSize() })}`),
     api('GET', '/products'),
@@ -479,21 +479,21 @@ async function ordersPage(mode = 'confirm') {
       <input class="grow" name="q" placeholder="بحث: الاسم، الهاتف، رقم الطلبية، التراكينغ" value="${esc(f.q)}">
       <button class="btn">بحث</button>
       ${ORDER_FILTERS.some((k) => !['status', 'page'].includes(k) && f[k]) ? '<button class="btn" type="button" id="clear">مسح الفلاتر</button>' : ''}
-      ${assigning ? '<button class="btn" type="button" id="pull" title="يجيب دوكا الطلبيات الجديدة من LightFunnels ومن الشيتات">تحديث الطلبيات</button>' : ''}
-      ${mode === 'confirm' ? '<button class="btn primary" type="button" id="new-order">+ طلبية يدوية</button>' : ''}
-      ${can('tracking') && mode === 'tracking' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
+      ${mode === 'confirm' && isAdminUser() ? '<button class="btn" type="button" id="pull" title="يجيب دوكا الطلبيات الجديدة من LightFunnels ومن الشيتات">تحديث الطلبيات</button>' : ''}
+      ${mode === 'confirm' && can('confirm.add') ? '<button class="btn primary" type="button" id="new-order">+ طلبية يدوية</button>' : ''}
+      ${can('tracking.sync') && mode === 'tracking' ? '<button class="btn" type="button" id="sync">تحديث حالات التوصيل</button>' : ''}
     </form>
     <div class="bulk hidden" id="bulk"><b id="bulk-n"></b>
       <select id="bulk-action"><option value="">تبديل الحالة للمحددين…</option>
-        <option value="confirm">مؤكدة</option><option value="no_answer">فاشلة (ما ردش +1)</option>
-        <option value="postpone">مؤجلة</option><option value="cancel">ملغاة</option></select>
+        ${[['confirm', 'مؤكدة', 'confirm.confirm'], ['no_answer', 'فاشلة (ما ردش +1)', 'confirm.fail'], ['postpone', 'مؤجلة', 'confirm.fail'], ['cancel', 'ملغاة', 'confirm.cancel']]
+    .filter(([, , perm]) => can(perm)).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <button class="btn small" id="bulk-go">تطبيق</button>
       ${assigning ? `<span class="bulk-sep"></span>
       <select id="assign-to"><option value="">عطيهم لـ…</option>
         ${team.agents.map((u) => `<option value="${u.id}">${esc(u.username)}</option>`).join('')}<option value="0">— نحيهم من المؤكدة</option></select>
       <label class="check"><input type="checkbox" id="assign-new"> كطلبيات جديدة (المحاولات ترجع 0)</label>
       <button class="btn small primary" id="assign-go">عطيهم</button>` : ''}</div>
-    ${assigning ? `<div class="bar muted">
+    ${assigning && isAdminUser() ? `<div class="bar muted">
       <label class="check">الفاشلة تتحول وحدها لـ"المؤكدة 2" ومن بعد "المؤكدة 3" تاع المنتج (تختارهم في صفحة المنتجات) بعد كل
         <input id="auto-transfer" type="number" min="0" max="20" value="${team.auto_transfer_after}" style="width:60px"> فاشلات (مثلا 2: بعد الفاشلة 2 والفاشلة 4) — 0 = لا</label>
       ${team.agents.length ? '' : '<span class="neg">مازال ما زدت حتى مؤكدة (صفحة المستخدمين)</span>'}</div>` : ''}
@@ -583,7 +583,8 @@ async function ordersPage(mode = 'confirm') {
       toast(`تعطاو ${r.assigned} طلبية`);
       router();
     });
-    main.querySelector('#auto-transfer').onchange = guard(async (e) => {
+    const auto = main.querySelector('#auto-transfer');
+    if (auto) auto.onchange = guard(async (e) => {
       await api('PUT', '/orders/agents', { auto_transfer_after: e.target.value });
       toast('تم الحفظ');
     });
@@ -652,6 +653,13 @@ const STATUS_MOVES = {
 const MOVE_ACTION = { no_answer: 'no_answer', postponed: 'postpone', confirmed: 'confirm', cancelled: 'cancel', delivered: 'delivered', returned: 'returned' };
 // Back to "new": undoing no answer / postponed resets the attempts; a cancelled order is reopened.
 const moveAction = (from, to) => (to === 'new' ? (['no_answer', 'postponed'].includes(from) ? 'reset' : 'reopen') : MOVE_ACTION[to]);
+// The permission box each order action needs (same as the server).
+const ACTION_PERM = {
+  confirm: 'confirm.confirm', no_answer: 'confirm.fail', postpone: 'confirm.fail', reset: 'confirm.fail', set_failed: 'confirm.fail',
+  unfail: 'confirm.fail', reopen: 'confirm.cancel', delivered: 'tracking.delivered', returned: 'tracking.returned', return_received: 'tracking.returned',
+};
+const CONFIRM_STAGE = ['new', 'no_answer', 'postponed', 'cancelled', 'fake'];
+const mayAct = (o, action) => can(action === 'cancel' ? (CONFIRM_STAGE.includes(o.status) ? 'confirm.cancel' : 'tracking.cancel') : ACTION_PERM[action]);
 
 const ICONS = {
   trash: '<path d="M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3"/>',
@@ -671,11 +679,12 @@ function statusCell(o) {
   const moves = STATUS_MOVES[o.status];
   if (o.status === 'returned') return `<span class="pill returned">${o.return_received_at ? 'روتور (وصل)' : 'روتور (في الطريق)'}</span>`;
   if (!moves) return `<span class="pill ${o.status}">${STATUS_LABELS[o.status] || o.status}</span>`;
-  const opts = [o.status, ...moves.filter((s) => s !== o.status)];
+  const opts = [o.status, ...moves.filter((s) => s !== o.status && mayAct(o, moveAction(o.status, s)))];
+  if (opts.length === 1 && !(o.status === 'no_answer' && can('confirm.fail'))) return `<span class="pill ${o.status}">${STATUS_LABELS[o.status] || o.status}</span>`;
   const label = (s) => (s === 'no_answer' ? `الفاشلة ${(o.call_attempts || 0) + 1}` : STATUS_LABELS[s]);
   // A failed order can also go back to a lower failed number (pressed by mistake).
   const now = Math.min(5, Math.max(1, o.call_attempts || 0));
-  const failed = o.status === 'no_answer' ? FAILED.map(([k, l], i) => [k, l, i + 1 === now]) : [];
+  const failed = o.status === 'no_answer' && can('confirm.fail') ? FAILED.map(([k, l], i) => [k, l, i + 1 === now]) : [];
   return `<select class="pill ${o.status}" data-move>
     ${failed.map(([k, l, sel]) => `<option value="${k}" ${sel ? 'selected' : ''}>${l}</option>`).join('')}
     ${opts.filter((s) => !(failed.length && s === 'no_answer')).map((s) =>
@@ -683,13 +692,16 @@ function statusCell(o) {
 }
 
 function orderRow(o, products, companies, stores) {
-  const edit = EDITABLE.includes(o.status);
-  // The agent column is shown to admins on the confirmation page.
-  const showAgent = isAdminUser() && location.hash.split('?')[0] === '#/orders';
+  const open = EDITABLE.includes(o.status);
+  // Each field opens only with its permission box; a confirmed order needs "tracking.edit".
+  const may = (perm) => open && can(CONFIRM_STAGE.includes(o.status) ? perm : 'tracking.edit');
+  const edit = may('confirm.edit');
+  // The agent column is shown to those who give orders out, on the confirmation page.
+  const showAgent = can('confirm.assign') && location.hash.split('?')[0] === '#/orders';
   const text = (field, value, attrs = '') => (edit
     ? `<input class="cell" data-field="${field}" value="${esc(value ?? '')}" ${attrs}>`
     : `<span>${esc(value ?? '')}</span>`);
-  const num = (field, value, w = 64) => (edit
+  const num = (field, value, w = 64) => (may({ unit_price: 'confirm.price', delivery_fee: 'confirm.delivery_price' }[field])
     ? `<input class="cell num" data-field="${field}" value="${esc(value ?? '')}" type="number" min="0" style="width:${w}px">`
     : `${Math.round(Number(value) || 0)}`);
   const pick = (field, list, selected, empty = '', cls = '') => `<select class="cell drop ${cls}" data-field="${field}">
@@ -707,11 +719,11 @@ function orderRow(o, products, companies, stores) {
       <span class="cust-check ${o.returned_count > o.delivered_count ? 'bad' : o.returned_count ? 'warn' : o.delivered_count ? 'good' : ''}"
         title="هاد الزبون: ${o.delivered_count} مستلمة و ${o.returned_count} روتور">✅ ${o.delivered_count} · ↩️ ${o.returned_count}</span></td>
     <td class="nowrap"><span class="calls ${o.call_attempts ? 'has' : ''}" title="محاولات الاتصال">${o.call_attempts || 0} ✆</span>
-      ${['new', 'no_answer', 'postponed'].includes(o.status) ? '<button class="plus" data-attempt title="ما ردش: الفاشلة اللي بعدها">+1</button>' : ''}
-      ${o.status === 'no_answer' ? '<button class="plus" data-unattempt title="غلطت: الفاشلة اللي قبلها">-1</button>' : ''}</td>
+      ${['new', 'no_answer', 'postponed'].includes(o.status) && can('confirm.fail') ? '<button class="plus" data-attempt title="ما ردش: الفاشلة اللي بعدها">+1</button>' : ''}
+      ${o.status === 'no_answer' && can('confirm.fail') ? '<button class="plus" data-unattempt title="غلطت: الفاشلة اللي قبلها">-1</button>' : ''}</td>
     <td class="nowrap">${statusCell(o)}${o.dispatch_error ? `<div class="err" title="${esc(o.dispatch_error)}">خطأ إرسال</div>` : ''}</td>
     <td>${text('address', o.address, 'style="width:120px"')}</td>
-    <td>${can('products') && edit
+    <td>${can('products.edit') && edit
       ? `<select class="cell drop ${o.store_id ? '' : 'missing'}" data-store title="البوتيك تاع المنتج: يتبدل للمنتج كامل">
           <option value="">— بلا بوتيك</option>
           ${stores.map((s) => `<option value="${s.id}" ${s.id === o.store_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`
@@ -728,19 +740,19 @@ function orderRow(o, products, companies, stores) {
     <td class="details">${edit
       ? `<textarea class="cell" data-field="notes" rows="1" placeholder="—">${esc(o.notes || '')}</textarea>`
       : esc(o.notes || '')}</td>
-    <td>${edit ? pick('company_id', companies.map((c) => [c.id, c.name]), o.company_id, '— بلا شركة', o.company_id ? '' : 'missing') : esc(o.company_name || '')}
+    <td>${may('confirm.company') ? pick('company_id', companies.map((c) => [c.id, c.name]), o.company_id, '— بلا شركة', o.company_id ? '' : 'missing') : esc(o.company_name || '')}
       ${o.tracking ? `<div class="muted" dir="ltr">${esc(o.tracking)}</div>` : ''}</td>
     ${showAgent ? `<td>${o.assigned_name ? `<b>${esc(o.assigned_name)}</b>` : '<span class="muted">—</span>'}</td>` : ''}
     <td class="muted">${esc(o.confirmed_by || '')}</td>
     <td class="acts nowrap">
-      ${isAdminUser() && !['dispatched', 'delivered', 'returned'].includes(o.status) ? `<button data-delete title="حذف">${icon('trash', 'red')}</button>` : ''}
+      ${can('confirm.delete') && !['dispatched', 'delivered', 'returned'].includes(o.status) ? `<button data-delete title="حذف">${icon('trash', 'red')}</button>` : ''}
       <button data-open title="السجل">${icon('clock')}</button>
-      ${o.status === 'confirmed' ? `<button data-dispatch title="إرسال لشركة التوصيل" class="dark">${icon('send')}</button>` : ''}
+      ${o.status === 'confirmed' && can('tracking.dispatch') ? `<button data-dispatch title="إرسال لشركة التوصيل" class="dark">${icon('send')}</button>` : ''}
       ${edit ? `<button data-edit title="تعديل كامل">${icon('edit', 'green')}</button>` : ''}
-      ${(o.status === 'confirmed' && can('tracking')) || (o.status === 'dispatched' && isAdminUser())
+      ${(o.status === 'confirmed' && can('tracking.back')) || (o.status === 'dispatched' && can('tracking.back_dispatched'))
         ? `<button data-back title="رجّعها لتأكيد الطلبيات${o.status === 'dispatched' ? ' (الطرد يتحذف عند شركة التوصيل)' : ''}">${icon('truck', 'red')}</button>` : ''}
       ${o.tracking ? `<button data-open title="التراكينغ: ${esc(o.tracking)}">${icon('truck', 'green')}</button>` : ''}
-      ${o.status === 'returned' && !o.return_received_at ? '<button class="btn small" data-received title="الطرد الراجع وصل ليدك: السلعة ترجع للستوك">وصل الروتور</button>' : ''}
+      ${o.status === 'returned' && !o.return_received_at && can('tracking.returned') ? '<button class="btn small" data-received title="الطرد الراجع وصل ليدك: السلعة ترجع للستوك">وصل الروتور</button>' : ''}
     </td></tr>`;
 }
 
@@ -880,6 +892,10 @@ async function openOrder(id) {
     <ul class="timeline">${o.events.map((e) =>
       `<li><span class="muted">${esc(fmtDate(e.created_at))}</span> · ${esc(EVENT_LABELS[e.type] || e.type)} ${e.message ? `— ${esc(e.message)}` : ''} ${e.username ? `<span class="muted">(${esc(e.username)})</span>` : ''}</li>`).join('')}</ul>`);
 
+  // Only the buttons this account has the boxes for.
+  box.querySelectorAll('[data-action]').forEach((b) => mayAct(o, b.dataset.action) || b.remove());
+  if (!can('tracking.dispatch')) box.querySelectorAll('[data-dispatch], [data-manual]').forEach((b) => b.remove());
+  if (!can(CONFIRM_STAGE.includes(o.status) ? 'confirm.edit' : 'tracking.edit')) box.querySelector('[data-edit]')?.remove();
   const after = (r) => {
     toast(r.status === 'dispatched' ? `تبعثت لـ ${r.company_name}${r.tracking ? ` (${r.tracking})` : ''}` : r.dispatch_error ? `مؤكدة، بصح الإرسال فشل: ${r.dispatch_error}` : 'تم', Boolean(r.dispatch_error));
     modal.close();
@@ -911,6 +927,8 @@ async function openOrder(id) {
 async function orderForm(order, products) {
   const companies = await api('GET', '/delivery/companies');
   const o = order || { quantity: 1, wilaya_code: 16, stop_desk: 0 };
+  // A field this account has no box for stays shown but can't be changed.
+  const lock = (perm) => (order && !can(CONFIRM_STAGE.includes(o.status) ? perm : 'tracking.edit') ? 'disabled' : '');
   const productOptions = (selected) => products.filter((p) => (p.active && !p.archived) || p.id === selected)
     .map((p) => `<option value="${p.id}" data-price="${p.price}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)} — ${money(p.price)}</option>`).join('');
   // One more product of the same parcel: product, quantity, unit price.
@@ -934,9 +952,9 @@ async function orderForm(order, products) {
         <label>البلدية<input name="commune" value="${esc(o.commune)}"></label>
         <label>العنوان<input name="address" value="${esc(o.address)}"></label>
         <label>الكمية<input name="quantity" type="number" min="1" value="${o.quantity}"></label>
-        <label>سعر الوحدة<input name="unit_price" type="number" value="${order ? o.unit_price : ''}" placeholder="سعر المنتج"></label>
-        ${order ? `<label>سعر التوصيل<input name="delivery_fee" type="number" value="${o.delivery_fee}"></label>
-        <label>شركة التوصيل<select name="company_id"><option value="">حسب الولاية</option>
+        <label>سعر الوحدة<input name="unit_price" type="number" value="${order ? o.unit_price : ''}" placeholder="سعر المنتج" ${lock('confirm.price')}></label>
+        ${order ? `<label>سعر التوصيل<input name="delivery_fee" type="number" value="${o.delivery_fee}" ${lock('confirm.delivery_price')}></label>
+        <label>شركة التوصيل<select name="company_id" ${lock('confirm.company')}><option value="">حسب الولاية</option>
           ${companies.map((c) => `<option value="${c.id}" ${c.id === o.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>` : ''}
       </div>
       ${order?.stock_reserved ? (o.items?.length ? `<div class="muted">منتجات أخرى: ${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join('، ')}</div>` : '') : `
@@ -1281,7 +1299,7 @@ async function productsPage() {
   const showArchived = new URLSearchParams(location.hash.split('?')[1] || '').get('archived') === '1';
   const [all, stores, companies, team] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies'),
     isAdminUser() ? api('GET', '/orders/agents') : null]);
-  const isAdmin = can('products');
+  const isAdmin = can('products.edit');
   const products = all.filter((p) => Boolean(p.archived) === showArchived);
   const archivedCount = all.filter((p) => p.archived).length;
   const agents = team ? team.agents.map((u) => ({ id: u.id, name: u.username })) : [];
@@ -1311,9 +1329,9 @@ async function productsPage() {
           <span class="save-box hidden"><button class="btn small primary" data-save>حفظ</button>
             <button class="btn small" data-cancel>إلغاء</button></span>
           <button class="btn small" data-embed="${p.id}">ربط صفحة الهبوط</button>
-          ${isAdmin ? `<button class="btn small" data-edit="${p.id}">تعديل</button>
-          <button class="btn small" data-stock="${p.id}">المخزون</button>
-          <button class="btn small" data-archive="${p.id}">${p.archived ? 'إرجاع' : 'إخفاء'}</button>
+          ${isAdmin ? `<button class="btn small" data-edit="${p.id}">تعديل</button>` : ''}
+          ${can('products.stock') ? `<button class="btn small" data-stock="${p.id}">المخزون</button>` : ''}
+          ${can('products.delete') ? `<button class="btn small" data-archive="${p.id}">${p.archived ? 'إرجاع' : 'إخفاء'}</button>
           ${Number(p.orders_count) ? '' : `<button class="btn small danger" data-del-product="${p.id}">حذف</button>`}` : ''}
         </td></tr>`).join('')}
     </table></div>`);
@@ -1425,7 +1443,7 @@ function embedDialog(p) {
     <pre class="code">${esc(`${origin}/form.html?key=${p.public_key}`)}</pre>
     <details><summary class="muted">عندك فورم خاص بيك؟</summary><pre class="code">${esc(custom)}</pre></details>
     <div class="actions" style="margin-top:12px">
-      ${can('products') ? '<button class="btn danger" data-regen>تغيير المفتاح</button>' : ''}
+      ${can('products.edit') ? '<button class="btn danger" data-regen>تغيير المفتاح</button>' : ''}
       <button class="btn" data-close>إغلاق</button>
     </div>`);
   box.querySelector('[data-copy]').onclick = () => navigator.clipboard.writeText(snippet).then(() => toast('تم النسخ'));
@@ -1871,16 +1889,27 @@ async function adsPage() {
 
 // ---------- users ----------
 // Ready-made sets of pages for the usual jobs; the boxes can still be changed one by one.
+const CONFIRM_JOB = ['confirm', 'confirm.add', 'confirm.edit', 'confirm.price', 'confirm.delivery_price', 'confirm.company', 'confirm.confirm', 'confirm.fail', 'confirm.cancel'];
+const TRACKING_JOB = ['tracking', 'tracking.edit', 'tracking.dispatch', 'tracking.back', 'tracking.cancel', 'tracking.delivered', 'tracking.returned', 'tracking.sync'];
 const USER_PRESETS = [
-  ['تأكيد', ['confirm']],
-  ['سويفي', ['tracking']],
-  ['تأكيد + سويفي', ['confirm', 'tracking']],
-  ['محاسب', ['stats', 'accounting', 'ads', 'products']],
+  ['تأكيد', CONFIRM_JOB],
+  ['سويفي', TRACKING_JOB],
+  ['تأكيد + سويفي', [...CONFIRM_JOB, ...TRACKING_JOB]],
+  ['محاسب', ['stats', 'dashboard', 'accounting', 'ads', 'products']],
 ];
 
-function permissionBoxes(perms, checked, disabled = false) {
-  return `<div class="perm-grid">${Object.entries(perms).map(([k, label]) => `<label class="check">
-    <input type="checkbox" name="perm" value="${k}" ${checked.includes(k) ? 'checked' : ''} ${disabled ? 'disabled' : ''}> ${esc(label)}</label>`).join('')}</div>`;
+// One box per page like Ecotrack's employee roles: the title box ticks the whole page,
+// the first line opens the page and the others are what can be done in it.
+function permissionBoxes(groups, checked) {
+  return `<div class="perm-groups">${groups.map(([title, perms], i) => {
+    const keys = Object.keys(perms);
+    const all = keys.every((k) => checked.includes(k));
+    return `<div class="perm-group">
+      <label class="check perm-head"><input type="checkbox" data-group="${i}" ${all ? 'checked' : ''}> ${esc(title)}</label>
+      <div class="perm-list">${keys.map((k, j) => `<label class="check ${j ? '' : 'perm-view'}">
+        <input type="checkbox" name="perm" value="${k}" data-in="${i}" ${checked.includes(k) ? 'checked' : ''}> ${esc(perms[k])}</label>`).join('')}</div>
+    </div>`;
+  }).join('')}</div>`;
 }
 
 // The role menu and the page boxes, for adding or editing an account.
@@ -1889,12 +1918,25 @@ function bindPermissionForm(form) {
   const boxes = () => form.querySelectorAll('[name=perm]');
   const storesBox = form.querySelector('.perm-stores');
   // The stores list only matters for an accountant (profit page ticked, not admin).
+  const groupBoxes = () => form.querySelectorAll('[data-group]');
+  const inGroup = (i) => [...form.querySelectorAll(`[name=perm][data-in="${i}"]`)];
   const sync = () => {
     boxes().forEach((b) => { b.disabled = role.value === 'admin'; if (role.value === 'admin') b.checked = true; });
+    groupBoxes().forEach((g) => { g.disabled = role.value === 'admin'; g.checked = inGroup(g.dataset.group).every((b) => b.checked); });
     const accounting = [...boxes()].some((b) => b.value === 'accounting' && b.checked);
     storesBox.classList.toggle('hidden', role.value === 'admin' || !accounting);
   };
-  form.addEventListener('change', (e) => { if (e.target.name === 'perm') sync(); });
+  form.addEventListener('change', (e) => {
+    const el = e.target;
+    if (el.dataset.group) inGroup(el.dataset.group).forEach((b) => (b.checked = el.checked));
+    else if (el.name === 'perm') {
+      // An action needs its page; no page, no actions.
+      const [view, ...actions] = inGroup(el.dataset.in);
+      if (el === view && !el.checked) actions.forEach((b) => (b.checked = false));
+      if (el !== view && el.checked) view.checked = true;
+    } else return;
+    sync();
+  });
   role.onchange = sync;
   form.querySelectorAll('[data-preset]').forEach((btn) => (btn.onclick = () => {
     role.value = 'agent';
@@ -1911,12 +1953,13 @@ function bindPermissionForm(form) {
   };
 }
 
-function permissionFields(perms, stores, user = { role: 'agent', permissions: [], accounting_store_ids: [] }) {
+function permissionFields(groups, stores, user = { role: 'agent', permissions: [], accounting_store_ids: [] }) {
+  const perms = Object.assign({}, ...groups.map(([, p]) => p));
   return `<label>النوع<select name="role"><option value="agent" ${user.role !== 'admin' ? 'selected' : ''}>عامل (يشوف غير الصفحات المكوشية)</option>
       <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>مدير (يشوف كلش ويزيد المستخدمين)</option></select></label>
     <div class="bar">${USER_PRESETS.map(([l], i) => `<button class="btn small" type="button" data-preset="${i}">${esc(l)}</button>`).join('')}</div>
     <div class="muted">واش يقدر يشوف ويخدم:</div>
-    ${permissionBoxes(perms, user.role === 'admin' ? Object.keys(perms) : user.permissions)}
+    ${permissionBoxes(groups, user.role === 'admin' ? Object.keys(perms) : user.permissions)}
     <div class="perm-stores card">
       <div><b>البوتيكات اللي يحاسبهم</b> <span class="muted">(ما تكوشي حتى وحدة = يشوف كل البوتيكات)</span></div>
       <div class="perm-grid">${stores.map((st) => `<label class="check"><input type="checkbox" name="store" value="${st.id}"
@@ -1925,7 +1968,10 @@ function permissionFields(perms, stores, user = { role: 'agent', permissions: []
 }
 
 async function usersPage() {
-  const [{ users, permissions }, stores] = await Promise.all([api('GET', '/users'), api('GET', '/stores')]);
+  const [{ users, groups }, stores] = await Promise.all([api('GET', '/users'), api('GET', '/stores')]);
+  // What an account has, page by page: "قيد التأكيد (8/12)".
+  const summary = (u) => groups.map(([title, perms]) => [title, Object.keys(perms).filter((k) => u.permissions.includes(k)).length, Object.keys(perms).length])
+    .filter(([, n]) => n).map(([title, n, total]) => `${esc(title)}${total > 1 ? ` (${n}/${total})` : ''}`).join('، ');
   const storeName = (id) => stores.find((st) => st.id === id)?.name || `#${id}`;
   const main = shell(`
     <h2>المستخدمين</h2>
@@ -1935,13 +1981,13 @@ async function usersPage() {
         <label>اسم المستخدم<input name="username" required></label>
         <label>كلمة السر<input name="password" type="password" required minlength="6"></label>
       </div>
-      ${permissionFields(permissions, stores)}
+      ${permissionFields(groups, stores)}
       <div class="actions"><button class="btn primary">إضافة</button></div>
     </form>
     <div class="table-wrap"><table>
       <tr><th>الاسم</th><th>النوع</th><th>واش يشوف</th><th>تاريخ الإنشاء</th><th></th></tr>
       ${users.map((u) => `<tr><td>${esc(u.username)}</td><td>${roleLabel(u)}</td>
-        <td class="muted">${u.role === 'admin' ? 'كلش' : u.permissions.map((k) => esc(permissions[k])).join('، ') || '—'}
+        <td class="muted">${u.role === 'admin' ? 'كلش' : summary(u) || '—'}
           ${u.role !== 'admin' && u.permissions.includes('accounting') ? `<div>الفايدة: ${u.accounting_store_ids.length ? u.accounting_store_ids.map((id) => esc(storeName(id))).join('، ') : 'كل البوتيكات'}</div>` : ''}</td>
         <td class="muted">${esc(fmtDate(u.created_at))}</td>
         <td class="actions"><button class="btn small" data-perms="${u.id}">الصلاحيات</button>
@@ -1959,7 +2005,7 @@ async function usersPage() {
   main.querySelectorAll('[data-perms]').forEach((b) => (b.onclick = () => {
     const u = users.find((x) => x.id === Number(b.dataset.perms));
     const box = modal.open(`<h3>صلاحيات ${esc(u.username)}</h3>
-      <form class="stack" id="perm-form">${permissionFields(permissions, stores, u)}
+      <form class="stack" id="perm-form">${permissionFields(groups, stores, u)}
         <div class="actions"><button class="btn primary">حفظ</button><button class="btn" type="button" data-close>إغلاق</button></div></form>`);
     const f = box.querySelector('#perm-form');
     const readEdit = bindPermissionForm(f);

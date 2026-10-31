@@ -81,19 +81,49 @@ export function authMiddleware(db) {
   };
 }
 
-// What a non-admin account can be allowed to see and do.
-export const PERMISSIONS = {
-  dashboard: 'لوحة التحكم',
-  stats: 'الإحصائيات',
-  confirm: 'تأكيد الطلبيات',
-  tracking: 'تتبع الطلبيات (السويفي)',
-  products: 'المنتجات',
-  accounting: 'الفايدة لكل منتج',
-  stores: 'البوتيكات',
-  sheets: 'الشيتات',
-  delivery: 'التوصيل',
-  ads: 'مصاريف الإشهار',
-};
+// What a non-admin account can be allowed to see and do, by page like Ecotrack's
+// employee roles: the first key of a group opens the page, the others are its actions.
+export const PERMISSION_GROUPS = [
+  ['قيد التأكيد', {
+    confirm: 'يشوف الطلبيات قيد التأكيد',
+    'confirm.all': 'يشوف طلبيات كل المؤكدين (ماشي غير تاعو)',
+    'confirm.add': 'إضافة طلبية يدوية',
+    'confirm.edit': 'تعديل (الاسم، الهاتف، العنوان، الولاية، الكمية...)',
+    'confirm.price': 'تعديل سعر المنتج',
+    'confirm.delivery_price': 'تعديل سعر التوصيل',
+    'confirm.company': 'تبديل شركة التوصيل',
+    'confirm.confirm': 'تأكيد',
+    'confirm.fail': 'ما ردش (الفاشلة) / مؤجلة',
+    'confirm.cancel': 'إلغاء / وهمية / إرجاعها جديدة',
+    'confirm.delete': 'حذف',
+    'confirm.assign': 'تعيين الطلبيات للمؤكدين',
+  }],
+  ['تتبع الطلبيات', {
+    tracking: 'يشوف الطلبيات المؤكدة والمرسلة',
+    'tracking.edit': 'تعديل طلبية مؤكدة',
+    'tracking.dispatch': 'إرسال لشركة التوصيل',
+    'tracking.back': 'رجوع للتأكيد (الشاحنة الحمراء)',
+    'tracking.back_dispatched': 'رجوع طلبية راهي عند التوصيل (يتحذف الطرد)',
+    'tracking.cancel': 'إلغاء طلبية مؤكدة',
+    'tracking.delivered': 'مستلمة',
+    'tracking.returned': 'روتور / وصل الروتور',
+    'tracking.sync': 'تحديث حالات التوصيل',
+  }],
+  ['المنتجات', {
+    products: 'يشوف المنتجات',
+    'products.edit': 'إضافة وتعديل (البوتيك، الشركة، السعر)',
+    'products.stock': 'المخزون',
+    'products.delete': 'حذف وإخفاء',
+  }],
+  ['الإحصائيات', { stats: 'الإحصائيات', dashboard: 'لوحة التحكم' }],
+  ['الفايدة لكل منتج', { accounting: 'الفايدة لكل منتج' }],
+  ['مصاريف الإشهار', { ads: 'مصاريف الإشهار' }],
+  ['البوتيكات', { stores: 'البوتيكات' }],
+  ['الشيتات', { sheets: 'الشيتات' }],
+  ['التوصيل', { delivery: 'التوصيل' }],
+];
+
+export const PERMISSIONS = Object.assign({}, ...PERMISSION_GROUPS.map(([, perms]) => perms));
 
 export const parsePermissions = (v) => String(v || '').split(',').map((s) => s.trim()).filter((s) => s in PERMISSIONS);
 
