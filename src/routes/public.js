@@ -68,6 +68,11 @@ export function publicRouter(db) {
       const payload = JSON.parse(raw);
       node = payload.node ?? payload;
       const result = topic === 'checkout' ? await lf.handleCheckoutEvent(db, link, node) : await lf.handleOrderEvent(db, link, topic, node);
+      if (topic !== 'checkout') {
+        const titles = (Array.isArray(node?.items) ? node.items : []).map((i) => i?.title).filter(Boolean).join(' + ');
+        console.log(`lightfunnels ${topic}`, result.ignored ? `ignored: ${result.ignored}` : result.duplicate ? 'duplicate' : `imported order ${result.order_id}`,
+          node?.name ?? '', node?.phone ?? node?.shipping_address?.phone ?? '', titles.slice(0, 300));
+      }
       if (topic === 'checkout') {
         console.log('lightfunnels checkout', result.ignored ? `ignored: ${result.ignored}` : result.duplicate ? 'duplicate' : `imported order ${result.order_id}`,
           JSON.stringify(result.node ?? node).slice(0, 1500));
@@ -77,6 +82,7 @@ export function publicRouter(db) {
     } catch (e) {
       if (!(e instanceof HttpError) && !(e instanceof SyntaxError)) throw e;
       // An order we can't read is kept with the reason; answering 200 stops LightFunnels from retrying it.
+      if (topic !== 'checkout') console.log(`lightfunnels ${topic} error:`, e.message, JSON.stringify(node).slice(0, 1500));
       if (topic === 'checkout') console.log('lightfunnels checkout error:', e.message, JSON.stringify(node).slice(0, 1500));
       await lf.recordEvent(db, link, topic, node, 'error', e.message);
       return c.json({ ok: false, error: e.message });
