@@ -1116,7 +1116,8 @@ async function accountingPage() {
         <td class="num">${x.in_hand}</td><td class="num">${money(x.left_value)}</td>
         <td class="num">${x.returning}</td><td class="num">${money(x.returning_value)}</td></tr>`).join('')}
     </table></div></div>` : ''}
-    <div class="table-wrap"><table>
+    <div class="top-scroll" id="top-scroll"><div></div></div>
+    <div class="table-wrap orders-wrap" id="products-wrap"><table>
       <tr><th>المنتج</th><th>البوتيك</th><th>المبيعات</th><th>المصاريف</th><th>الفايدة</th><th>الوضعية</th><th>مشرية</th><th>عندي</th><th>قيمة الباقي</th><th>عند التوصيل</th><th>تليفرات</th><th>روتور جاي</th><th>ناقص</th><th></th></tr>
       ${products.map((p) => `<tr>
         <td>${esc(p.name)}</td><td>${esc(p.store_name || '—')}</td>
@@ -1300,7 +1301,8 @@ async function productsPage() {
             <button class="btn small" data-cancel>إلغاء</button></span>
           <button class="btn small" data-embed="${p.id}">ربط صفحة الهبوط</button>
           ${isAdmin ? `<button class="btn small" data-edit="${p.id}">تعديل</button>
-          <button class="btn small" data-stock="${p.id}">المخزون</button>` : ''}
+          <button class="btn small" data-stock="${p.id}">المخزون</button>
+          ${Number(p.orders_count) ? '' : `<button class="btn small danger" data-del-product="${p.id}">حذف</button>`}` : ''}
         </td></tr>`).join('')}
     </table></div>`);
 
@@ -1337,6 +1339,14 @@ async function productsPage() {
     refresh();
   }));
   if (saveAll) saveAll.onclick = guard(() => saveRows([...main.querySelectorAll('tr.dirty')]));
+  syncTopScroll(main.querySelector('#top-scroll'), main.querySelector('#products-wrap'));
+  main.querySelectorAll('[data-del-product]').forEach((b) => (b.onclick = guard(async () => {
+    const p = products.find((x) => x.id === Number(b.dataset.delProduct));
+    if (!confirm(`حذف "${p.name}"؟ ما يرجعش.`)) return;
+    await api('DELETE', `/products/${p.id}`);
+    toast('تحذف المنتج');
+    router();
+  })));
   const byId = (id) => products.find((p) => p.id === Number(id));
   const add = main.querySelector('#add');
   if (add) add.onclick = () => productForm(null, stores);
