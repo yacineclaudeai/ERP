@@ -118,6 +118,55 @@ export async function pullRecent(db, link, { first = 25 } = {}) {
   return result;
 }
 
+const fold = (s) => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+// Side by side: the latest LightFunnels orders (whose items name `q`) and what the ERP has for each.
+// `importMissing` brings in the ones the ERP doesn't have (at most 40 per call, to stay under the time limit).
+export async function compareOrders(db, link, { q = '', pages = 6, importMissing = false } = {}) {
+  const words = fold(q).split(' ').filter(Boolean);
+  const nodes = [];
+  let after = null;
+  for (let page = 0; page < Math.min(Math.max(1, pages), 10); page++) {
+    const data = await graphql(db, link, `query($first: Int, $after: String) { orders(query: "order_by:id order_dir:desc", first: $first, after: $after) { edges { cursor node { ${ORDER_FIELDS} } } } }`, { first: 50, after });
+    const edges = data.orders?.edges || [];
+    nodes.push(...edges.map((e) => e.node));
+    if (edges.length < 50 || !edges.at(-1).cursor) break;
+    after = edges.at(-1).cursor;
+  }
+  const titles = (n) => (n.items || []).map((i) => i?.title).filter(Boolean);
+  const wanted = nodes.filter((n) => !n.test && (!words.length || words.every((w) => fold(titles(n).join(' ')).includes(w))));
+  const rows = [];
+  let imported = 0;
+  for (const n of wanted) {
+    const lfId = text(n._id ?? n.id);
+    let known = await db.get(`SELECT o.id, o.reference, o.status, p.name AS product, s.name AS store FROM lightfunnels_orders l
+      JOIN orders o ON o.id = l.order_id JOIN products p ON p.id = o.product_id LEFT JOIN stores s ON s.id = p.store_id
+      WHERE l.link_id = ? AND l.lf_order_id = ?`, link.id, lfId);
+    let error = null;
+    if (!known && importMissing && imported < 40) {
+      try {
+        const r = await handleOrderEvent(db, link, 'created', n);
+        await recordEvent(db, link, 'pull', n, r.ignored ? 'ignored' : r.duplicate ? 'duplicate' : 'imported', typeof r.ignored === 'string' ? r.ignored : null, r.order_id);
+        if (r.order_id && !r.duplicate) imported++;
+        if (r.ignored) error = r.ignored;
+      } catch (e) {
+        if (!(e instanceof HttpError)) throw e;
+        error = e.message;
+      }
+      known = await db.get(`SELECT o.id, o.reference, o.status, p.name AS product, s.name AS store FROM lightfunnels_orders l
+        JOIN orders o ON o.id = l.order_id JOIN products p ON p.id = o.product_id LEFT JOIN stores s ON s.id = p.store_id
+        WHERE l.link_id = ? AND l.lf_order_id = ?`, link.id, lfId);
+    }
+    rows.push({
+      lf_name: text(n.name) || lfId, created_at: text(n.created_at), items: titles(n).join(' + '),
+      phone: text(n.phone ?? n.shipping_address?.phone ?? n.customer?.phone),
+      order_id: known?.id ?? null, reference: known?.reference ?? null, status: known?.status ?? null,
+      product: known?.product ?? null, store: known?.store ?? null, error,
+    });
+  }
+  return { scanned: nodes.length, oldest: text(nodes.at(-1)?.created_at), matched: rows.length, missing: rows.filter((r) => !r.order_id).length, imported, rows };
+}
+
 // After the user accepts: keep the tokens and ask LightFunnels to send the orders here.
 export async function connectLink(db, linkId, code, origin) {
   const t = await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(origin) });

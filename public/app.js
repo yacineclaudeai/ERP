@@ -1645,6 +1645,7 @@ async function sheetsPage() {
           <td class="num">${l.imported_count}</td><td class="muted">${fmtDate(l.last_event_at) || '—'}</td>
           <td class="muted" style="white-space:pre-line;color:var(--danger)">${esc(l.last_error || '')}</td>
           <td class="actions"><a class="btn small primary" href="/api/lightfunnels/${l.id}/connect">${l.connected ? 'عاود الربط' : 'ربط'}</a>
+            ${l.connected ? `<button class="btn small" data-lf-compare="${l.id}">قارن الطلبيات</button>` : ''}
             <button class="btn small danger" data-lf-del="${l.id}">حذف</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">ما كاين حتى ربط</td></tr>'}
       </table></div>
       ${direct.events.length ? `<details><summary class="muted">آخر الطلبيات اللي وصلت من LightFunnels</summary>
@@ -1667,6 +1668,7 @@ async function sheetsPage() {
           <button class="btn small" data-edit="${g.id}">تعديل</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">زيد الشيت الأول</td></tr>'}
     </table></div>`);
   main.querySelector('#lf-add').onclick = () => lfForm(stores);
+  main.querySelectorAll('[data-lf-compare]').forEach((b) => (b.onclick = () => lfCompare(Number(b.dataset.lfCompare))));
   main.querySelectorAll('[data-lf-del]').forEach((b) => (b.onclick = guard(async () => {
     if (!confirm('حذف الربط؟ الطلبيات اللي دخلت تبقى.')) return;
     await api('DELETE', `/lightfunnels/${b.dataset.lfDel}`);
@@ -1680,6 +1682,41 @@ async function sheetsPage() {
     toast(`دخلو ${r.imported} طلبية${r.errors.length ? `، ${r.errors.length} أخطاء` : ''}`, r.errors.length > 0);
     router();
   })));
+}
+
+// Compares the latest LightFunnels orders with the ERP, one by one, and brings in the missing ones.
+function lfCompare(linkId) {
+  const statusLabel = (st) => STATUS_LABELS[st] || st;
+  const box = modal.open(`
+    <h3>قارن الطلبيات مع LightFunnels</h3>
+    <form class="bar" id="cmp-form">
+      <input name="q" placeholder="اسم المنتج كيما في LightFunnels (مثلا: pyjama 5)" style="flex:1">
+      <select name="pages"><option value="2">آخر 100 طلبية</option><option value="6" selected>آخر 300 طلبية</option><option value="10">آخر 500 طلبية</option></select>
+      <button class="btn primary">قارن</button>
+    </form>
+    <div id="cmp-out" class="muted">اكتب اسم المنتج (ولا خليه فارغ باش تشوف كل الطلبيات) واضغط قارن.</div>
+    <div class="actions"><button class="btn" type="button" data-close>غلق</button></div>`);
+  const out = box.querySelector('#cmp-out');
+  const run = async (doImport) => {
+    const f = formData(box.querySelector('#cmp-form'));
+    out.innerHTML = '<p class="muted">نقرا من LightFunnels…</p>';
+    const r = await api('POST', `/lightfunnels/${linkId}/compare`, { q: f.q, pages: Number(f.pages), import: doImport });
+    out.innerHTML = `
+      <p>قريت <b>${r.scanned}</b> طلبية من LightFunnels${r.oldest ? ` (أقدم وحدة: ${esc(r.oldest)})` : ''}.
+        فيهم <b>${r.matched}</b> فيها هذا المنتج: <span class="pos">${r.matched - r.missing} كاينين في الموقع</span>،
+        <span class="${r.missing ? 'neg' : 'muted'}">${r.missing} ناقصين</span>${doImport ? `، دخلو دوكا ${r.imported}` : ''}.</p>
+      ${r.missing && !doImport ? '<div class="bar"><button class="btn primary" id="cmp-import">دخّل الناقصين</button></div>' : ''}
+      <div class="table-wrap" style="max-height:50vh;overflow:auto"><table>
+        <tr><th>LightFunnels</th><th>الوقت</th><th>المنتج في LightFunnels</th><th>الهاتف</th><th>في الموقع</th></tr>
+        ${r.rows.map((x) => `<tr><td dir="ltr">${esc(x.lf_name)}</td><td class="muted">${esc(x.created_at || '')}</td><td>${esc(x.items)}</td>
+          <td dir="ltr">${esc(x.phone || '')}</td>
+          <td>${x.order_id ? `<span class="pos">✅ ${esc(x.reference || String(x.order_id))}</span> · ${esc(statusLabel(x.status))} · ${esc(x.product || '')}${x.store ? ` <span class="muted">(${esc(x.store)})</span>` : ''}`
+            : `<span class="neg">❌ ما كانش${x.error ? `: ${esc(x.error)}` : ''}</span>`}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">ما لقيت حتى طلبية بهذا الاسم</td></tr>'}
+      </table></div>`;
+    const imp = out.querySelector('#cmp-import');
+    if (imp) imp.onclick = guard(async () => { imp.disabled = true; await run(true); });
+  };
+  box.querySelector('#cmp-form').onsubmit = guard(async (e) => { e.preventDefault(); await run(false); });
 }
 
 // A LightFunnels account is connected to one store; the products of its orders are matched in that store.

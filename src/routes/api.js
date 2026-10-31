@@ -646,6 +646,12 @@ export function apiRouter(db) {
     if (!link) throw new HttpError(404, 'الربط غير موجود');
     return c.redirect(lf.authorizeUrl(new URL(c.req.url).origin, link.id));
   });
+  r.post('/lightfunnels/:id/compare', requirePerm('sheets'), async (c) => {
+    const link = await db.get('SELECT * FROM lightfunnels_links WHERE id = ?', idParam(c));
+    if (!link) throw new HttpError(404, 'الربط غير موجود');
+    const b = body(c);
+    return c.json(await lf.compareOrders(db, link, { q: String(b.q || ''), pages: Number(b.pages) || 6, importMissing: b.import === true }));
+  });
   r.delete('/lightfunnels/:id', requirePerm('sheets'), async (c) => {
     await db.run('DELETE FROM lightfunnels_links WHERE id = ?', idParam(c));
     return c.json({ ok: true });

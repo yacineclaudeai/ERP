@@ -1085,3 +1085,43 @@ test('branch linking: a parcel counts for the most specific product, unread stor
   assert.equal(r.status, 200);
   assert.equal((await db.get('SELECT store_id FROM products WHERE id = ?', id)).store_id, a);
 });
+
+test('compare with LightFunnels: shows which orders of a product are in the ERP and imports the missing ones', async () => {
+  process.env.LF_CLIENT_ID = 'test-client';
+  process.env.LF_CLIENT_SECRET = 'test-secret';
+  await api('POST', '/api/auth/login', { username: 'admin', password: 'admin123' });
+  const { id } = (await api('POST', '/api/lightfunnels', { name: 'compte compare' })).body;
+  await db.run("UPDATE lightfunnels_links SET access_token = 'tok', expires_at = now() + interval '1 hour' WHERE id = ?", id);
+  const order = (n, title) => ({
+    id: `order_cmp${n}`, _id: 7000 + n, name: `#CMP${n}`, total: 3000, shipping: 500, test: false, created_at: '2026-10-30T10:00:00Z',
+    customer: { full_name: 'Cmp Client' }, shipping_address: { first_name: 'Cmp', phone: `05519900${40 + n}`, line1: 'Rue 3', city: 'Oran', state: 'Oran' },
+    items: [{ title, sku: `CMP${n}`, price: 2500 }],
+  });
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).startsWith('https://services.lightfunnels.com')) return real(url, init);
+    const { variables } = JSON.parse(init.body);
+    calls.push(variables);
+    return Response.json({ data: { orders: { edges: [
+      { cursor: 'c1', node: order(1, 'Pyjama 5 pièces namri') },
+      { cursor: 'c2', node: order(2, 'Pyjama 5 pieces namri Tailles:L') },
+      { cursor: 'c3', node: order(3, 'Robe autre') },
+    ] } } });
+  };
+  try {
+    const before = (await api('POST', `/api/lightfunnels/${id}/compare`, { q: 'pyjama 5 pieces' })).body;
+    assert.equal(before.scanned, 3);
+    assert.equal(before.matched, 2);
+    assert.equal(before.missing, 2);
+    assert.equal(calls.length, 1, 'a short page ends the reading');
+    const after = (await api('POST', `/api/lightfunnels/${id}/compare`, { q: 'pyjama 5 pieces', import: true })).body;
+    assert.equal(after.imported, 2);
+    assert.equal(after.missing, 0);
+    assert.ok(after.rows.every((r) => r.reference && r.product));
+  } finally {
+    globalThis.fetch = real;
+    delete process.env.LF_CLIENT_ID;
+    delete process.env.LF_CLIENT_SECRET;
+  }
+});
