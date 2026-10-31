@@ -911,7 +911,7 @@ async function openOrder(id) {
 async function orderForm(order, products) {
   const companies = await api('GET', '/delivery/companies');
   const o = order || { quantity: 1, wilaya_code: 16, stop_desk: 0 };
-  const productOptions = (selected) => products.filter((p) => p.active || p.id === selected)
+  const productOptions = (selected) => products.filter((p) => (p.active && !p.archived) || p.id === selected)
     .map((p) => `<option value="${p.id}" data-price="${p.price}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)} — ${money(p.price)}</option>`).join('');
   // One more product of the same parcel: product, quantity, unit price.
   const itemRow = (i = {}) => `<div class="grid3 item-row">
@@ -1278,15 +1278,19 @@ function accountingCard(a, p) {
 
 // ---------- products ----------
 async function productsPage() {
-  const [products, stores, companies, team] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies'),
+  const showArchived = new URLSearchParams(location.hash.split('?')[1] || '').get('archived') === '1';
+  const [all, stores, companies, team] = await Promise.all([api('GET', '/products'), api('GET', '/stores'), api('GET', '/delivery/companies'),
     isAdminUser() ? api('GET', '/orders/agents') : null]);
   const isAdmin = can('products');
+  const products = all.filter((p) => Boolean(p.archived) === showArchived);
+  const archivedCount = all.filter((p) => p.archived).length;
   const agents = team ? team.agents.map((u) => ({ id: u.id, name: u.username })) : [];
   const select = (field, list, selected, empty) => `<select class="cell" data-product-field="${field}" data-orig="${selected ?? ''}"><option value="">${empty}</option>
     ${list.map((x) => `<option value="${x.id}" ${x.id === selected ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
   const main = shell(`
-    <h2>المنتجات</h2>
+    <h2>${showArchived ? 'المنتجات المخفية' : 'المنتجات'}</h2>
     ${isAdmin ? `<div class="bar"><button class="btn primary" id="add">+ منتج جديد</button>
+      <a class="btn" href="${showArchived ? '#/products' : '#/products?archived=1'}">${showArchived ? 'رجوع للمنتجات' : `المخفيين (${archivedCount})`}</a>
       <button class="btn primary hidden" id="save-all"></button>
       <button class="btn" id="link-stores" title="يقرا الطرود اللي بعثها كل فرع عند شركة التوصيل تاعو، ويعرف منها كل منتج لأنهي فرع">ربط المنتجات بالفروع تلقائياً</button>
       <button class="btn" id="merge-variants" title="المنتجات اللي تسجلو بالمقاس واللون في الاسم يولو منتج واحد، والمقاس/اللون يروح لعمود المتغير في الطلبيات">جمع المنتجات المكررة بالمتغير</button></div>` : ''}
@@ -1309,6 +1313,7 @@ async function productsPage() {
           <button class="btn small" data-embed="${p.id}">ربط صفحة الهبوط</button>
           ${isAdmin ? `<button class="btn small" data-edit="${p.id}">تعديل</button>
           <button class="btn small" data-stock="${p.id}">المخزون</button>
+          <button class="btn small" data-archive="${p.id}">${p.archived ? 'إرجاع' : 'إخفاء'}</button>
           ${Number(p.orders_count) ? '' : `<button class="btn small danger" data-del-product="${p.id}">حذف</button>`}` : ''}
         </td></tr>`).join('')}
     </table></div>`);
@@ -1351,6 +1356,12 @@ async function productsPage() {
     if (!confirm(`حذف "${p.name}"؟ ما يرجعش.`)) return;
     await api('DELETE', `/products/${p.id}`);
     toast('تحذف المنتج');
+    router();
+  })));
+  main.querySelectorAll('[data-archive]').forEach((b) => (b.onclick = guard(async () => {
+    const p = products.find((x) => x.id === Number(b.dataset.archive));
+    await api('PUT', `/products/${p.id}/archive`, { archived: !p.archived });
+    toast(p.archived ? 'رجع المنتج للقائمة' : 'تخبى المنتج، تلقاه في "المخفيين"');
     router();
   })));
   const byId = (id) => products.find((p) => p.id === Number(id));
@@ -1836,7 +1847,7 @@ async function adsPage() {
     <h2>مصاريف الإشهار</h2>
     <p class="muted">دخل شحال صرفت في Meta Ads (ولا غيرها) لكل منتج في كل يوم، باش تحسب الفايدة الصافية والتكلفة لكل طلبية.</p>
     <form class="bar card" id="ad-form">
-      <label>المنتج<select name="product_id" required>${products.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
+      <label>المنتج<select name="product_id" required>${products.filter((p) => !p.archived).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
       <label>التاريخ<input type="date" name="date" value="${today()}" required></label>
       <label>المبلغ (دج)<input type="number" name="amount" required></label>
       <button class="btn primary">حفظ</button>

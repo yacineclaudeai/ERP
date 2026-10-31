@@ -305,3 +305,4 @@ a { color: #0b4f22; font-weight: 800; }
 .cust-check.good { border-color: #16a34a; background: #f0fdf4; }
 .cust-check.warn { border-color: #f59e0b; background: #fffbeb; }
 .cust-check.bad { border-color: #dc2626; background: #fef2f2; }
+a.btn { text-decoration: none; display: inline-block; }

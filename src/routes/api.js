@@ -144,8 +144,13 @@ export function apiRouter(db) {
     const id = idParam(c);
     const used = await db.get(`SELECT (SELECT count(*) FROM orders WHERE product_id = ?)::int
       + (SELECT count(*) FROM order_items WHERE product_id = ?)::int AS n`, id, id);
-    if (used.n) throw new HttpError(409, `ما تقدرش تحذفو: عندو ${used.n} طلبية. وقفو من "تعديل" ولا جمعو مع منتج آخر`);
+    if (used.n) throw new HttpError(409, `ما تقدرش تحذفو: عندو ${used.n} طلبية. خبيه بزر "إخفاء"`);
     const { rows } = await db.run('DELETE FROM products WHERE id = ? RETURNING id', id);
+    if (!rows.length) throw new HttpError(404, 'المنتج غير موجود');
+    return c.json({ ok: true });
+  });
+  r.put('/products/:id/archive', requirePerm('products'), async (c) => {
+    const { rows } = await db.run('UPDATE products SET archived = ? WHERE id = ? RETURNING id', Boolean(body(c).archived), idParam(c));
     if (!rows.length) throw new HttpError(404, 'المنتج غير موجود');
     return c.json({ ok: true });
   });
