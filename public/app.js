@@ -1039,6 +1039,8 @@ async function linkStoresDialog(stores) {
       } while (page <= last);
       log(`${esc(s.name)}: ${texts[s.id].length} طرد`);
     } catch (err) {
+      // Not read = not in the comparison, so its products are left alone.
+      delete texts[s.id];
       log(`<span class="neg">${esc(err.message)}</span>`);
     }
   }
