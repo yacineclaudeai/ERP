@@ -1194,6 +1194,11 @@ test('a product without orders can be deleted; one with orders is refused', asyn
   assert.equal((await api('DELETE', `/api/products/${empty.id}`)).status, 200);
   const names = (await api('GET', '/api/products')).body.map((p) => p.name);
   assert.ok(!names.includes('Produit vide') && names.includes('Produit utilisé'));
+  // A product with orders is hidden instead, and can come back.
+  assert.equal((await api('PUT', `/api/products/${used.id}/archive`, { archived: true })).status, 200);
+  assert.equal((await api('GET', '/api/products')).body.find((p) => p.id === used.id).archived, true);
+  await api('PUT', `/api/products/${used.id}/archive`, { archived: false });
+  assert.equal((await api('GET', '/api/products')).body.find((p) => p.id === used.id).archived, false);
 });
 
 test('My Ecom Delivery: parcel created with KEY/Token headers, commune and stop desk matched, refusals shown', async () => {
