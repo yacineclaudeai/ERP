@@ -17,7 +17,7 @@ const SOURCE_LABELS = { landing: 'صفحة الهبوط', sheet: 'شيت', light
 const SOURCE_ICONS = { landing: '🌐', sheet: '📗', abandoned: '🛒', manual: '✍️' };
 // wa.me wants the number in international form, without the leading 0.
 const whatsapp = (phone) => `https://wa.me/213${String(phone).replace(/^0/, '')}`;
-const PROVIDER_LABELS = { ecotrack: 'Ecotrack (API)', sandbox: 'تجربة (بدون API)', manual: 'يدوي (بدون API)' };
+const PROVIDER_LABELS = { ecotrack: 'Ecotrack (API)', myecom: 'My Ecom (API)', sandbox: 'تجربة (بدون API)', manual: 'يدوي (بدون API)' };
 
 const state = { user: null, meta: null };
 const app = document.getElementById('app');

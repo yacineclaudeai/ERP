@@ -1,8 +1,9 @@
 import { ecotrack } from './ecotrack.js';
 import { sandbox } from './sandbox.js';
 import { manual } from './manual.js';
+import { myecom } from './myecom.js';
 
-const PROVIDERS = { ecotrack, sandbox, manual };
+const PROVIDERS = { ecotrack, myecom, sandbox, manual };
 
 export const PROVIDER_NAMES = Object.keys(PROVIDERS);
 

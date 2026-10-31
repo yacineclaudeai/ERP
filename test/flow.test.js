@@ -1195,3 +1195,49 @@ test('a product without orders can be deleted; one with orders is refused', asyn
   const names = (await api('GET', '/api/products')).body.map((p) => p.name);
   assert.ok(!names.includes('Produit vide') && names.includes('Produit utilisé'));
 });
+
+test('My Ecom Delivery: parcel created with KEY/Token headers, commune and stop desk matched, refusals shown', async () => {
+  const { myecom, mapEcomSituation } = await import('../src/delivery/myecom.js');
+  const company = { base_url: 'https://ecom-dz.com/api_v2', api_key: 'k1', api_token: 't1' };
+  const order = { reference: 'CMD-000123', customer_name: 'Amine', phone: '0770123456', wilaya_code: 16, commune: 'alger centre',
+    quantity: 2, total: 4500, stop_desk: false, address: 'Rue 1', notes: null, variant: 'M', items: [] };
+  const real = globalThis.fetch;
+  const calls = [];
+  let refuse = false;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    if (u.host !== 'ecom-dz.com') return real(url, init);
+    calls.push({ path: u.pathname, query: Object.fromEntries(u.searchParams), headers: init.headers, body: init.body && JSON.parse(init.body) });
+    if (u.pathname.endsWith('/communes')) return Response.json([{ commune: 'Alger Centre' }, { commune: 'Ain Benian' }]);
+    if (u.pathname.endsWith('/stopdesks')) return Response.json([{ code_stopdesk: '16B', commune: 'Bab Ezzouar', nom_bureau: 'Bab Ezzouar' }, { code_stopdesk: '16E', commune: 'Alger Centre', nom_bureau: 'Centre' }]);
+    if (u.pathname.endsWith('/colis') && init.method === 'POST') {
+      return Response.json(refuse
+        ? { total: 1, crees: 0, echecs: 1, resultats: [{ index: 0, ok: false, erreur: 'total minimum 400 DA pour cette wilaya' }] }
+        : { total: 1, crees: 1, echecs: 0, resultats: [{ index: 0, ok: true, tracking: 'ECBGB031' }] }, { status: 201 });
+    }
+    if (u.pathname.endsWith('/colis')) return Response.json({ total: 2, page: 1, total_pages: 1, items: [
+      { tracking: 'EC1', article: 'Pyjama x1', mobile: '0550000001', id_situation: 7 },
+      { tracking: 'EC2', article: 'Robe x1', mobile: '0550000002', id_situation: 6 }] });
+    if (u.pathname.endsWith('/colis/EC1')) return Response.json({ tracking: 'EC1', situation: 'Livrée', id_situation: 7 });
+    return Response.json({ error: { code: 'colis_introuvable', message: 'introuvable' } }, { status: 404 });
+  };
+  try {
+    assert.deepEqual(await myecom.createShipment(company, order, { name: 'Pyjama' }), { tracking: 'ECBGB031' });
+    const post = calls.find((c) => c.body);
+    assert.equal(post.headers['X-API-Key'], 'k1');
+    assert.equal(post.headers['X-API-Token'], 't1');
+    assert.deepEqual([post.body[0].commune, post.body[0].article, post.body[0].id_externe, post.body[0].stopdesk], ['Alger Centre', 'Pyjama x2', 'CMD-000123', 0]);
+    await myecom.createShipment(company, { ...order, stop_desk: true }, { name: 'Pyjama' });
+    assert.equal(calls.filter((c) => c.body).at(-1).body[0].code_stopdesk, '16E');
+    refuse = true;
+    await assert.rejects(myecom.createShipment(company, order, { name: 'Pyjama' }), /total minimum 400/);
+    const page = await myecom.listParcels(company, new Date('2026-09-01'), new Date('2026-10-31'));
+    assert.deepEqual(page.parcels.map((p) => [p.tracking, p.outcome]), [['EC1', 'delivered'], ['EC2', 'returned']]);
+    assert.equal(page.last_page, 1);
+    assert.deepEqual(await myecom.getStatus(company, 'EC1'), { raw: 'Livrée', status: 'delivered' });
+    await assert.rejects(myecom.createShipment({ ...company, api_key: null }, order, { name: 'X' }), /KEY/);
+    assert.equal(mapEcomSituation(26), 'dispatched');
+  } finally {
+    globalThis.fetch = real;
+  }
+});
